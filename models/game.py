@@ -267,8 +267,8 @@ class TexasHoldemGame:
     phase: GamePhase = GamePhase.WAITING   # 游戏阶段
     active_player_index: int = 0           # 当前行动玩家索引
     dealer_index: int = 0                  # 庄家位置索引
-    small_blind: int = 10                  # 小盲注
-    big_blind: int = 20                    # 大盲注
+    small_blind: int = 1                   # 小盲注
+    big_blind: int = 2                     # 大盲注
     created_at: int = field(default_factory=lambda: int(time.time()))  # 创建时间
     last_action_time: int = field(default_factory=lambda: int(time.time()))  # 最后行动时间
     timeout_seconds: int = 30              # 超时时间
@@ -366,8 +366,8 @@ class TexasHoldemGame:
             current_bet=data.get('current_bet', 0),
             active_player_index=data.get('active_player_index', 0),
             dealer_index=data.get('dealer_index', 0),
-            small_blind=data.get('small_blind', 10),
-            big_blind=data.get('big_blind', 20),
+            small_blind=data.get('small_blind', 1),
+            big_blind=data.get('big_blind', 2),
             created_at=data.get('created_at', int(time.time())),
             last_action_time=data.get('last_action_time', int(time.time())),
             timeout_seconds=data.get('timeout_seconds', 30)

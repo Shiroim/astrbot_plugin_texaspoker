@@ -52,9 +52,9 @@ class GameEngine:
             
             # 参数验证和默认值设置
             if small_blind is None:
-                small_blind = self.storage.get_plugin_config_value('small_blind', 10)
+                small_blind = self.storage.get_plugin_config_value('small_blind', 1)
             if big_blind is None:
-                big_blind = self.storage.get_plugin_config_value('big_blind', 20)
+                big_blind = self.storage.get_plugin_config_value('big_blind', 2)
             
             # 验证参数合理性
             if small_blind <= 0 or big_blind <= 0:
@@ -62,7 +62,7 @@ class GameEngine:
             if big_blind <= small_blind:
                 return False, "大盲注必须大于小盲注", None
             
-            default_chips = self.storage.get_plugin_config_value('default_chips', 1000)
+            default_chips = self.storage.get_plugin_config_value('default_chips', 500)
             timeout_seconds = self.storage.get_plugin_config_value('action_timeout', 30)
             
             # 验证配置的合理性
@@ -1002,69 +1002,81 @@ class GameEngine:
                     )
     
     def _create_side_pots(self, game: TexasHoldemGame) -> List[Dict[str, Any]]:
-        """创建边池系统 - 简化的基于当前下注的处理"""
+        """创建边池系统 - 修复版本"""
         # 获取所有参与摊牌的玩家（未弃牌的玩家）
         active_players = [p for p in game.players if not p.is_folded]
         
         if len(active_players) <= 1:
             return [{'amount': game.pot, 'players': active_players}]
         
-        # 检查是否有全下玩家
+        # 检查是否有全下玩家且投入水平不同
         all_in_players = [p for p in active_players if p.is_all_in]
         
         if not all_in_players:
             # 没有全下玩家，只有一个主池
+            logger.debug("没有全下玩家，创建单一主池")
             return [{'amount': game.pot, 'players': active_players}]
         
-        # 简化处理：创建基于当前下注的边池系统
-        logger.info(f"检测到 {len(all_in_players)} 位全下玩家，创建边池系统")
+        # 检查是否所有玩家的投入水平相同
+        bet_amounts = [p.current_bet for p in active_players]
+        unique_bets = set(bet_amounts)
         
-        # 获取所有不同的下注水平
-        bet_levels = set()
-        for player in active_players:
-            bet_levels.add(player.current_bet)
+        if len(unique_bets) <= 1:
+            # 所有玩家投入相同，不需要边池
+            logger.debug(f"所有玩家投入水平相同({list(unique_bets)})，创建单一主池")
+            return [{'amount': game.pot, 'players': active_players}]
         
-        bet_levels = sorted(bet_levels)
-        logger.debug(f"下注水平: {bet_levels}")
+        # 需要创建边池系统
+        logger.info(f"检测到 {len(all_in_players)} 位全下玩家，投入水平不同，创建边池系统")
         
+        # 按投入水平对玩家分组
+        bet_levels = sorted(unique_bets)
         side_pots = []
-        previous_level = 0
         
-        for level in bet_levels:
+        for i, level in enumerate(bet_levels):
             if level <= 0:
                 continue
                 
-            # 计算这个水平的投入差异
-            level_contribution = level - previous_level
-            
-            # 找出能参与这个水平的玩家（下注至少达到这个水平）
+            # 找出投入至少达到这个水平的玩家
             eligible_players = [p for p in active_players if p.current_bet >= level]
             
-            if eligible_players and level_contribution > 0:
-                pot_amount = level_contribution * len(eligible_players)
+            if not eligible_players:
+                continue
                 
+            # 计算这个水平的边池大小
+            if i == 0:
+                # 第一个边池：所有符合条件的玩家按最低投入水平
+                contribution_per_player = level
+            else:
+                # 后续边池：按投入差额
+                contribution_per_player = level - bet_levels[i-1]
+            
+            pot_amount = contribution_per_player * len(eligible_players)
+            
+            if pot_amount > 0:
                 side_pots.append({
                     'amount': pot_amount,
                     'players': eligible_players.copy()
                 })
                 
-                logger.debug(f"边池水平 {level}: {pot_amount} 筹码, 玩家: {[p.nickname for p in eligible_players]}")
+                logger.debug(f"边池 {i+1} (投入水平{level}): {pot_amount} 筹码, 玩家: {[p.nickname for p in eligible_players]}")
+        
+        # 验证并调整边池总额
+        total_calculated = sum(pot['amount'] for pot in side_pots)
+        if total_calculated != game.pot:
+            difference = game.pot - total_calculated
+            logger.info(f"边池计算差异: 计算总额 {total_calculated}, 实际底池 {game.pot}, 差异 {difference}")
             
-            previous_level = level
+            if side_pots and difference != 0:
+                # 将差异添加到最大的边池中
+                side_pots[-1]['amount'] += difference
+                logger.info(f"已将差异 {difference} 添加到最后一个边池")
         
-        # 验证总金额是否匹配
-        total_side_pot = sum(pot['amount'] for pot in side_pots)
-        if total_side_pot != game.pot:
-            logger.warning(f"边池总额 {total_side_pot} 与游戏底池 {game.pot} 不匹配，调整最后一个边池")
-            if side_pots:
-                adjustment = game.pot - total_side_pot
-                side_pots[-1]['amount'] += adjustment
-        
-        # 如果没有创建任何边池，创建一个默认的
+        # 如果没有创建边池，创建默认主池
         if not side_pots:
             side_pots = [{'amount': game.pot, 'players': active_players}]
         
-        # 记录最终的边池信息
+        # 记录最终边池信息
         for i, pot in enumerate(side_pots):
             logger.info(f"最终边池 {i+1}: {pot['amount']} 筹码, 参与玩家: {[p.nickname for p in pot['players']]}")
         

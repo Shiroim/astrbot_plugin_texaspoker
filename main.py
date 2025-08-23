@@ -210,11 +210,11 @@ class TexasPokerPlugin(Star):
             hand_images = {}
             for player in game.players:
                 if len(player.hole_cards) >= 2:
-                    # 渲染手牌图片
+                        # 渲染手牌图片
                     hand_img = self.game_controller.renderer.render_hand_cards(player, game)
-                    filename = f"hand_{player.user_id}_{game.game_id}.png"
+                        filename = f"hand_{player.user_id}_{game.game_id}.png"
                     img_path = self.game_controller.renderer.save_image(hand_img, filename)
-                    if img_path:
+                        if img_path:
                         hand_images[player.user_id] = img_path
                         # 添加到临时文件跟踪
                         self.game_controller.temp_files.setdefault(group_id, []).append(img_path)
@@ -231,7 +231,7 @@ class TexasPokerPlugin(Star):
                 logger.info(f"手牌发送完成，成功 {success_count}/{total_count}")
             else:
                 logger.warning(f"手牌发送部分失败，成功 {success_count}/{total_count}")
-                
+            
         except Exception as e:
             logger.error(f"发送手牌失败: {e}")
     
@@ -242,7 +242,7 @@ class TexasPokerPlugin(Star):
             success = await self.message_service.send_group_text(group_id, message)
             if not success:
                 logger.warning(f"发送行动提示消息失败: {group_id}")
-        except Exception as e:
+                except Exception as e:
             logger.error(f"发送行动提示消息异常: {e}")
     
     async def get_plugin_status(self) -> Dict[str, Any]:
@@ -254,7 +254,7 @@ class TexasPokerPlugin(Star):
                 'storage_stats': self.storage.get_storage_statistics(),
                 'memory_usage': await self._get_memory_usage()
             }
-        except Exception as e:
+                except Exception as e:
             logger.error(f"获取插件状态失败: {e}")
             return {'error': str(e)}
     

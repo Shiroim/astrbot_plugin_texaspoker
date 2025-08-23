@@ -49,11 +49,22 @@
 
 ## ⚙️ 配置选项
 
-在AstrBot管理面板中可配置：
+### 🔧 配置修改方法
 
-- **default_chips**: 玩家初始筹码（默认1000）
-- **small_blind**: 默认小盲注（默认10）
-- **big_blind**: 默认大盲注（默认20）  
+**重要**: 配置修改有两种方式：
+
+1. **推荐方式**: 通过AstrBot管理面板的"插件配置"页面修改
+2. **开发方式**: 修改 `_conf_schema.json` 后需要重启AstrBot才能生效
+
+### 📝 可配置项目
+
+- **default_chips**: 玩家初始筹码（默认500K）
+- **default_buyin**: 默认买入金额（默认50K）
+- **small_blind**: 默认小盲注（默认1K）
+- **big_blind**: 默认大盲注（默认2K）
+- **min_buyin**: 最小买入金额（默认10K）
+- **max_buyin**: 最大买入金额（默认200K）
+- **min_bet**: 最小下注金额（默认1K）  
 - **action_timeout**: 行动超时时间（默认30秒）
 - **min_players**: 最少玩家数（默认2人）
 - **max_players**: 最多玩家数（默认9人）
