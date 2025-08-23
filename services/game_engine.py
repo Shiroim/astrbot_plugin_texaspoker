@@ -546,16 +546,13 @@ class GameEngine:
                 # 更新行动时间
                 game.update_last_action_time()
                 
-                # 检查是否需要进入下一阶段
-                await self._check_betting_round_complete(game)
-                
                 # 检测阶段变化，并在消息中标记
                 if game.phase != previous_phase:
                     game._phase_just_changed = True
                 else:
                     game._phase_just_changed = False
                 
-                # 保存游戏状态
+                # 保存游戏状态（注意：阶段变化可能在_move_to_next_player中异步发生）
                 self.storage.save_game(group_id, game.to_dict())
                 
                 # 重置超时检查
@@ -696,8 +693,11 @@ class GameEngine:
                 logger.debug("所有玩家已完成本轮下注")
                 break
         
-        # 如果没有找到需要行动的玩家，下注轮结束
+        # 如果没有找到需要行动的玩家，下注轮结束，检查是否应该进入下一阶段
         logger.debug("本轮下注结束，没有玩家需要继续行动")
+        
+        # 异步检查下注轮是否完成
+        asyncio.create_task(self._check_betting_round_complete(game))
     
     def _player_needs_action(self, player: Player, game: TexasHoldemGame) -> bool:
         """
@@ -859,12 +859,20 @@ class GameEngine:
             game.update_last_action_time()
             logger.debug(f"阶段转换完成: {previous_phase.value} -> {game.phase.value}")
             
+            # 保存游戏状态（阶段切换后）
+            self.storage.save_game(game.group_id, game.to_dict())
+            
             # 发送新阶段的行动提示
             if self.action_prompt_callback and game.phase != GamePhase.SHOWDOWN:
                 asyncio.create_task(self.action_prompt_callback(game.group_id, game))
             
         except Exception as e:
             logger.error(f"阶段切换时发生错误: {e}")
+            # 即使出错也尝试保存当前状态
+            try:
+                self.storage.save_game(game.group_id, game.to_dict())
+            except:
+                pass
             raise
     
     def _deal_remaining_community_cards(self, game: TexasHoldemGame, deck: Deck):
