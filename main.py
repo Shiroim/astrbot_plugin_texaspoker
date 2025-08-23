@@ -224,10 +224,27 @@ class TexasPokerPlugin(Star):
             yield event.plain_result("当前没有进行中的游戏")
             return
         
+        # 检查游戏是否已结束，如果是则清理
+        if game.phase.value == "finished":
+            # 清理已结束的游戏
+            self.game_engine.cleanup_finished_game(group_id)
+            yield event.plain_result("上一局游戏已结束，请使用 /德州创建 开始新游戏")
+            return
+        
+        # 构建阶段显示文本
+        phase_display = {
+            "waiting": "等待玩家",
+            "pre_flop": "翻牌前",
+            "flop": "翻牌圈",
+            "turn": "转牌圈", 
+            "river": "河牌圈",
+            "showdown": "摊牌中"
+        }
+        
         # 构建状态信息
         status_lines = [
             f"🎮 游戏ID: {game.game_id}",
-            f"🎯 阶段: {game.phase.value.upper()}",
+            f"🎯 阶段: {phase_display.get(game.phase.value, game.phase.value.upper())}",
             f"💰 底池: {fmt_chips(game.pot) if game.pot is not None else '0K'}",
             f"👥 玩家数: {len(game.players)}",
             "",
@@ -246,10 +263,36 @@ class TexasPokerPlugin(Star):
                 status_line += " (全下)"
             status_lines.append(status_line)
         
-        if game.phase in ["pre_flop", "flop", "turn", "river"]:
+        # 显示当前行动玩家和可用操作
+        if game.phase.value in ["pre_flop", "flop", "turn", "river"]:
             active_player = game.get_active_player()
             if active_player:
+                call_amount = game.current_bet - active_player.current_bet
                 status_lines.append(f"\n⏰ 当前行动玩家: {active_player.nickname}")
+                
+                # 显示可用操作
+                available_actions = []
+                if call_amount > 0:
+                    if call_amount <= active_player.chips:
+                        available_actions.append(f"/跟注 ({fmt_chips(call_amount)})")
+                    available_actions.append("/弃牌")
+                else:
+                    available_actions.append("/让牌")
+                
+                if active_player.chips > 0:
+                    available_actions.append(f"/加注 [金额]")
+                    available_actions.append("/全下")
+                
+                if available_actions:
+                    status_lines.append(f"💡 可用操作: {' | '.join(available_actions)}")
+        
+        elif game.phase.value == "waiting":
+            min_players = self.storage.get_plugin_config_value('min_players', 2)
+            if len(game.players) >= min_players:
+                status_lines.append(f"\n✅ 可以开始游戏，使用 /德州开始")
+            else:
+                need_players = min_players - len(game.players)
+                status_lines.append(f"\n⏳ 还需要 {need_players} 名玩家才能开始，使用 /德州加入 [买入金额]")
         
         yield event.plain_result("\n".join(status_lines))
     
@@ -297,14 +340,15 @@ class TexasPokerPlugin(Star):
             group_id = event.get_group_id() or user_id
             
             success, message = self.game_engine.player_action(group_id, user_id, action, amount)
-            # 确保message是字符串
-            message_text = str(message) if message is not None else "操作失败"
-            yield event.plain_result(message_text)
             
             if success:
-                # 检查游戏状态变化
+                # 获取更新后的游戏状态
                 game = self.game_engine.get_game_state(group_id)
                 if game:
+                    # 构建完整的回复信息，包含下一个操作者提示
+                    full_message = self._build_action_result_message(game, message)
+                    yield event.plain_result(full_message)
+                    
                     # 如果阶段改变，发送新的公共牌
                     if game.phase.value in ["flop", "turn", "river"]:
                         community_result = await self._send_community_cards(group_id)
@@ -318,6 +362,14 @@ class TexasPokerPlugin(Star):
                             yield showdown_result
                         # 清理该游戏的所有临时文件
                         self._cleanup_temp_files(group_id)
+                else:
+                    # 确保message是字符串
+                    message_text = str(message) if message is not None else "操作完成"
+                    yield event.plain_result(message_text)
+            else:
+                # 确保message是字符串  
+                message_text = str(message) if message is not None else "操作失败"
+                yield event.plain_result(message_text)
             
         except Exception as e:
             logger.error(f"处理玩家行动失败: {e}")
@@ -400,6 +452,70 @@ class TexasPokerPlugin(Star):
         yield event.plain_result(help_text)
     
     # ==================== 私有方法 ====================
+    
+    def _build_action_result_message(self, game, original_message: str) -> str:
+        """构建包含下一个操作者提示的完整行动结果消息"""
+        try:
+            message_parts = [str(original_message) if original_message else "操作完成"]
+            
+            # 构建阶段显示文本
+            phase_display = {
+                "pre_flop": "翻牌前",
+                "flop": "翻牌圈", 
+                "turn": "转牌圈",
+                "river": "河牌圈",
+                "showdown": "摊牌中",
+                "finished": "游戏结束"
+            }
+            
+            # 检查是否刚刚进入新阶段
+            phase_just_changed = getattr(game, '_phase_just_changed', False)
+            if phase_just_changed and game.phase.value in ["flop", "turn", "river"]:
+                phase_name = phase_display.get(game.phase.value, game.phase.value)
+                message_parts.append(f"🎯 进入 {phase_name} 阶段")
+            
+            # 如果游戏仍在进行，添加下一个操作者信息
+            if game.phase.value in ["pre_flop", "flop", "turn", "river"]:
+                active_player = game.get_active_player()
+                if active_player:
+                    call_amount = game.current_bet - active_player.current_bet
+                    
+                    # 下一个玩家信息
+                    message_parts.append(f"\n⏰ 下一个操作: {active_player.nickname}")
+                    
+                    # 显示可用操作
+                    available_actions = []
+                    if call_amount > 0:
+                        if call_amount <= active_player.chips:
+                            available_actions.append(f"/跟注 ({fmt_chips(call_amount)})")
+                        available_actions.append("/弃牌")
+                    else:
+                        available_actions.append("/让牌")
+                    
+                    if active_player.chips > 0:
+                        available_actions.append("/加注 [金额]")
+                        available_actions.append("/全下")
+                    
+                    if available_actions:
+                        message_parts.append(f"💡 可用操作: {' | '.join(available_actions)}")
+            
+            elif game.phase.value == "showdown":
+                # 摊牌阶段，显示所有未弃牌玩家
+                active_players = [p for p in game.players if not p.is_folded]
+                if len(active_players) > 1:
+                    player_names = [p.nickname for p in active_players]
+                    message_parts.append(f"\n🃏 摊牌对决: {' vs '.join(player_names)}")
+                else:
+                    message_parts.append(f"\n🏆 {active_players[0].nickname} 获胜！")
+            
+            elif game.phase.value == "finished":
+                message_parts.append("\n🎮 游戏结束，感谢参与！")
+            
+            return "\n".join(message_parts)
+            
+        except Exception as e:
+            logger.error(f"构建行动结果消息失败: {e}")
+            return str(original_message) if original_message else "操作完成"
     
     async def _send_hand_cards_to_players(self, group_id: str) -> None:
         """私聊发送手牌给每个玩家"""

@@ -352,19 +352,19 @@ class GameEngine:
             game.current_bet = 0
             game.phase = GamePhase.PRE_FLOP
             
-            # 创建新牌组并洗牌
-            deck = Deck()
-            deck.shuffle()
+            # 创建新牌组并洗牌，保存到游戏对象中以保持一致性
+            game._current_deck = Deck()
+            game._current_deck.shuffle()
             
             # 验证牌组有足够的牌
             cards_needed = len(game.players) * 2 + 5  # 手牌 + 公共牌
-            if deck.remaining_count() < cards_needed:
+            if game._current_deck.remaining_count() < cards_needed:
                 raise ValueError("牌组数量不足")
             
             # 每个玩家发2张手牌
             for player in game.players:
                 try:
-                    player.hole_cards = deck.deal_multiple(2)
+                    player.hole_cards = game._current_deck.deal_multiple(2)
                     if len(player.hole_cards) != 2:
                         raise ValueError(f"玩家 {player.nickname} 发牌失败")
                 except Exception as e:
@@ -484,6 +484,9 @@ class GameEngine:
             if player.is_folded:
                 return False, "您已弃牌，无法进行操作"
             
+            # 记录当前阶段，用于检测阶段变化
+            previous_phase = game.phase
+            
             # 处理具体行动
             success, message = self._process_player_action(game, player, action, amount)
             
@@ -493,6 +496,12 @@ class GameEngine:
                 
                 # 检查是否需要进入下一阶段
                 self._check_betting_round_complete(game)
+                
+                # 检测阶段变化，并在消息中标记
+                if game.phase != previous_phase:
+                    game._phase_just_changed = True
+                else:
+                    game._phase_just_changed = False
                 
                 # 保存游戏状态
                 self.storage.save_game(group_id, game.to_dict())
@@ -641,38 +650,92 @@ class GameEngine:
     
     def _advance_to_next_phase(self, game: TexasHoldemGame):
         """进入下一游戏阶段"""
-        # 重置所有玩家的下注状态
-        for player in game.players:
-            player.current_bet = 0
-        game.current_bet = 0
-        
-        # 设置下一阶段的行动玩家（小盲注位置开始）
-        self._set_first_to_act(game)
-        
-        # 发公共牌并更新阶段
-        deck = Deck()
-        
-        if game.phase == GamePhase.PRE_FLOP:
-            # 翻牌：发3张公共牌
-            game.community_cards = deck.deal_multiple(3)
-            game.phase = GamePhase.FLOP
+        try:
+            # 重置所有玩家的下注状态
+            for player in game.players:
+                player.current_bet = 0
+            game.current_bet = 0
             
-        elif game.phase == GamePhase.FLOP:
-            # 转牌：发1张公共牌
-            game.community_cards.extend(deck.deal_multiple(1))
-            game.phase = GamePhase.TURN
+            # 设置下一阶段的行动玩家（小盲注位置开始）
+            self._set_first_to_act(game)
             
-        elif game.phase == GamePhase.TURN:
-            # 河牌：发1张公共牌
-            game.community_cards.extend(deck.deal_multiple(1))
-            game.phase = GamePhase.RIVER
+            # 使用游戏中保存的牌组，保持一致性
+            deck = getattr(game, '_current_deck', None)
+            if not deck:
+                # 如果没有保存的牌组，创建新的（兼容性处理）
+                deck = Deck()
+                game._current_deck = deck
             
-        elif game.phase == GamePhase.RIVER:
-            # 摊牌阶段
-            self._showdown(game)
-            return
-        
-        game.update_last_action_time()
+            previous_phase = game.phase
+            
+            if game.phase == GamePhase.PRE_FLOP:
+                # 翻牌：发3张公共牌
+                game.community_cards = deck.deal_multiple(3)
+                game.phase = GamePhase.FLOP
+                logger.info(f"游戏 {game.game_id} 进入翻牌圈")
+                
+            elif game.phase == GamePhase.FLOP:
+                # 转牌：发1张公共牌
+                game.community_cards.extend(deck.deal_multiple(1))
+                game.phase = GamePhase.TURN
+                logger.info(f"游戏 {game.game_id} 进入转牌圈")
+                
+            elif game.phase == GamePhase.TURN:
+                # 河牌：发1张公共牌
+                game.community_cards.extend(deck.deal_multiple(1))
+                game.phase = GamePhase.RIVER
+                logger.info(f"游戏 {game.game_id} 进入河牌圈")
+                
+            elif game.phase == GamePhase.RIVER:
+                # 摊牌阶段
+                logger.info(f"游戏 {game.game_id} 进入摊牌阶段")
+                self._showdown(game)
+                return
+            
+            # 检查是否所有有效玩家都已全下，如果是则直接跳到摊牌
+            active_players = [p for p in game.players if not p.is_folded]
+            non_all_in_players = [p for p in active_players if not p.is_all_in]
+            
+            if len(non_all_in_players) <= 1:
+                # 只有一个或没有非全下玩家，直接跳到摊牌
+                logger.info(f"游戏 {game.game_id} 所有玩家已全下或弃牌，跳转到摊牌")
+                if game.phase != GamePhase.RIVER:
+                    # 快速发完剩余公共牌
+                    self._deal_remaining_community_cards(game, deck)
+                self._showdown(game)
+                return
+            
+            game.update_last_action_time()
+            logger.debug(f"阶段转换完成: {previous_phase.value} -> {game.phase.value}")
+            
+        except Exception as e:
+            logger.error(f"阶段切换时发生错误: {e}")
+            raise
+    
+    def _deal_remaining_community_cards(self, game: TexasHoldemGame, deck: Deck):
+        """发完剩余的公共牌（当所有玩家全下时使用）"""
+        try:
+            # 根据当前阶段发完剩余公共牌
+            if game.phase == GamePhase.PRE_FLOP:
+                # 发翻牌（3张）+ 转牌（1张）+ 河牌（1张）= 5张
+                remaining_cards = deck.deal_multiple(5)
+                game.community_cards.extend(remaining_cards)
+                game.phase = GamePhase.RIVER
+            elif game.phase == GamePhase.FLOP:
+                # 发转牌（1张）+ 河牌（1张）= 2张
+                remaining_cards = deck.deal_multiple(2) 
+                game.community_cards.extend(remaining_cards)
+                game.phase = GamePhase.RIVER
+            elif game.phase == GamePhase.TURN:
+                # 发河牌（1张）
+                remaining_cards = deck.deal_multiple(1)
+                game.community_cards.extend(remaining_cards) 
+                game.phase = GamePhase.RIVER
+            
+            logger.info(f"快速发完剩余公共牌，当前公共牌数量: {len(game.community_cards)}")
+            
+        except Exception as e:
+            logger.error(f"发剩余公共牌时出错: {e}")
     
     def _set_first_to_act(self, game: TexasHoldemGame):
         """设置第一个行动的玩家（小盲注位置开始）"""
@@ -879,11 +942,45 @@ class GameEngine:
         """获取游戏状态"""
         return self.active_games.get(group_id)
     
+    def cleanup_finished_game(self, group_id: str) -> bool:
+        """清理已结束的游戏"""
+        try:
+            if group_id in self.active_games:
+                game = self.active_games[group_id]
+                if game.phase == GamePhase.FINISHED:
+                    # 删除活动游戏
+                    del self.active_games[group_id]
+                    
+                    # 删除存储中的游戏数据
+                    self.storage.delete_game(group_id)
+                    
+                    # 清理超时任务
+                    if group_id in self.timeouts:
+                        try:
+                            self.timeouts[group_id].cancel()
+                        except Exception as e:
+                            logger.warning(f"取消超时任务失败: {e}")
+                        del self.timeouts[group_id]
+                    
+                    logger.info(f"已清理结束的游戏: {game.game_id}")
+                    return True
+            return False
+        except Exception as e:
+            logger.error(f"清理游戏时发生错误: {e}")
+            return False
+    
     def load_game_from_storage(self, group_id: str) -> bool:
         """从存储中加载游戏"""
         game_data = self.storage.get_game(group_id)
         if game_data:
             game = TexasHoldemGame.from_dict(game_data)
+            
+            # 如果游戏已结束，直接清理而不加载
+            if game.phase == GamePhase.FINISHED:
+                logger.info(f"跳过加载已结束的游戏: {game.game_id}")
+                self.storage.delete_game(group_id)
+                return False
+            
             self.active_games[group_id] = game
             
             # 如果游戏在进行中，启动超时检查
