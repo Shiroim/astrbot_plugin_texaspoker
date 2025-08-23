@@ -381,7 +381,7 @@ class TexasPokerPlugin(Star):
                 'storage_stats': self.storage.get_storage_statistics(),
                 'memory_usage': await self._get_memory_usage()
             }
-                except Exception as e:
+        except Exception as e:
             logger.error(f"获取插件状态失败: {e}")
             return {'error': str(e)}
     
