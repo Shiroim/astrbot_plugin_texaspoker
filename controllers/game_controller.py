@@ -34,12 +34,17 @@ class GameController:
         # 临时文件管理
         self.temp_files: Dict[str, List[str]] = {}
         
+        # 行动提示回调
+        self.action_prompt_callback = None
+        
         logger.info("游戏控制器初始化完成")
     
     async def initialize(self) -> None:
         """初始化控制器，恢复游戏状态"""
         try:
             await self._restore_active_games()
+            # 设置游戏引擎的行动提示回调
+            self.game_engine.set_action_prompt_callback(self._send_action_prompt)
             logger.info("游戏控制器启动完成")
         except Exception as e:
             logger.error(f"游戏控制器初始化失败: {e}")
@@ -124,8 +129,8 @@ class GameController:
             game = self.game_engine.get_game_state(group_id)
             previous_phase = game.phase if game else None
             
-            # 执行行动
-            success, message = self.game_engine.player_action(group_id, user_id, action, amount)
+            # 执行行动 - 修复: 添加await
+            success, message = await self.game_engine.player_action(group_id, user_id, action, amount)
             if not success:
                 return False, message, None
             
@@ -141,6 +146,10 @@ class GameController:
     def get_game_state(self, group_id: str) -> Optional[TexasHoldemGame]:
         """获取游戏状态"""
         return self.game_engine.get_game_state(group_id)
+    
+    def set_action_prompt_callback(self, callback):
+        """设置行动提示回调函数"""
+        self.action_prompt_callback = callback
     
     async def cleanup_finished_game(self, group_id: str) -> bool:
         """清理已结束的游戏"""
@@ -312,3 +321,87 @@ class GameController:
             raise ValidationError(f"买入金额过少，最少需要 {min_buyin}K")
         if buyin_amount > max_buyin:
             raise ValidationError(f"买入金额过多，最多允许 {max_buyin}K")
+    
+    async def _send_action_prompt(self, group_id: str, game) -> None:
+        """发送行动提示消息"""
+        try:
+            if not self.action_prompt_callback:
+                return
+            
+            # 获取当前行动的玩家
+            active_player = game.get_active_player()
+            if not active_player:
+                return
+            
+            # 构建行动提示消息
+            prompt_message = self._build_action_prompt_message(game, active_player)
+            
+            # 通过回调发送消息
+            await self.action_prompt_callback(group_id, prompt_message)
+            
+        except Exception as e:
+            logger.error(f"发送行动提示失败: {e}")
+    
+    def _build_action_prompt_message(self, game, active_player) -> str:
+        """构建行动提示消息"""
+        from ..utils.money_formatter import fmt_chips
+        
+        phase_names = {
+            "pre_flop": "翻牌前",
+            "flop": "翻牌圈", 
+            "turn": "转牌圈",
+            "river": "河牌圈"
+        }
+        
+        phase_name = phase_names.get(game.phase.value, game.phase.value.upper())
+        
+        lines = [
+            f"🎯 轮到 {active_player.nickname} 行动",
+            "",
+            f"📊 游戏状态:",
+            f"• 阶段: {phase_name}",
+            f"• 底池: {fmt_chips(game.pot)}",
+            f"• 当前下注: {fmt_chips(game.current_bet) if game.current_bet > 0 else '无'}",
+            f"• 玩家筹码: {fmt_chips(active_player.chips)}",
+            f"• 已下注: {fmt_chips(active_player.current_bet)}",
+            "",
+            "💡 可用操作:"
+        ]
+        
+        # 计算可用操作
+        available_actions = self._get_available_actions(game, active_player)
+        for action in available_actions:
+            lines.append(f"• {action}")
+        
+        return "\n".join(lines)
+    
+    def _get_available_actions(self, game, active_player) -> List[str]:
+        """获取玩家可用的操作列表"""
+        actions = []
+        
+        call_amount = game.current_bet - active_player.current_bet
+        
+        if call_amount == 0:
+            # 没有下注，可以让牌
+            actions.append("/让牌 - 不下注继续游戏")
+        else:
+            # 有下注，可以跟注
+            from ..utils.money_formatter import fmt_chips
+            actions.append(f"/跟注 - 跟上 {fmt_chips(call_amount)}")
+        
+        # 弃牌总是可用
+        actions.append("/弃牌 - 放弃当前手牌")
+        
+        # 加注 (如果有足够筹码)
+        if active_player.chips > call_amount:
+            min_raise = max(game.big_blind, call_amount)
+            if active_player.chips > min_raise:
+                from ..utils.money_formatter import fmt_chips
+                actions.append(f"/加注 [金额] - 最少加注 {fmt_chips(min_raise)}")
+        
+        # 全下 (如果有筹码)
+        if active_player.chips > 0:
+            from ..utils.money_formatter import fmt_chips
+            actions.append(f"/全下 - 押上所有 {fmt_chips(active_player.chips)}")
+        
+        return actions

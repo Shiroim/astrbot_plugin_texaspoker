@@ -65,6 +65,9 @@ class TexasPokerPlugin(Star):
             # 初始化游戏控制器
             await self.game_controller.initialize()
             
+            # 设置行动提示回调
+            self.game_controller.set_action_prompt_callback(self._send_action_prompt_message)
+            
             logger.info("德州扑克插件启动完成")
         except Exception as e:
             logger.error(f"插件初始化失败: {e}")
@@ -231,6 +234,16 @@ class TexasPokerPlugin(Star):
                 
         except Exception as e:
             logger.error(f"发送手牌失败: {e}")
+    
+    async def _send_action_prompt_message(self, group_id: str, message: str) -> None:
+        """发送行动提示消息到群聊"""
+        try:
+            # 通过消息服务发送到群聊
+            success = await self.message_service.send_group_text(group_id, message)
+            if not success:
+                logger.warning(f"发送行动提示消息失败: {group_id}")
+        except Exception as e:
+            logger.error(f"发送行动提示消息异常: {e}")
     
     async def get_plugin_status(self) -> Dict[str, Any]:
         """获取插件状态（用于监控和调试）"""

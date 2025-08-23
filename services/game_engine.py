@@ -24,6 +24,11 @@ class GameEngine:
         self.active_games: Dict[str, TexasHoldemGame] = {}
         self.timeouts: Dict[str, asyncio.Task] = {}
         self.timeout_locks: Dict[str, asyncio.Lock] = {}  # 防止超时操作的竞态条件
+        self.action_prompt_callback = None  # 行动提示回调
+    
+    def set_action_prompt_callback(self, callback):
+        """设置行动提示回调函数"""
+        self.action_prompt_callback = callback
     
     def create_game(self, group_id: str, creator_id: str, creator_nickname: str,
                    small_blind: Optional[int] = None, big_blind: Optional[int] = None) -> Tuple[bool, str, Optional[TexasHoldemGame]]:
@@ -331,6 +336,10 @@ class GameEngine:
             
             # 启动超时检查
             self._start_timeout_check(group_id)
+            
+            # 发送第一个行动提示
+            if self.action_prompt_callback:
+                asyncio.create_task(self.action_prompt_callback(group_id, game))
             
             logger.info(f"游戏开始: {game.game_id}, 玩家数: {len(game.players)}")
             return True, f"游戏开始！参与玩家: {len(game.players)}人"
@@ -670,6 +679,11 @@ class GameEngine:
             # 检查玩家是否需要行动
             if self._player_needs_action(next_player, game):
                 logger.debug(f"下一个行动玩家: {next_player.nickname} (索引: {game.active_player_index})")
+                
+                # 发送行动提示
+                if self.action_prompt_callback:
+                    asyncio.create_task(self.action_prompt_callback(game.group_id, game))
+                
                 return
                 
             # 如果回到原始玩家，说明这轮下注完成
@@ -828,6 +842,10 @@ class GameEngine:
             
             game.update_last_action_time()
             logger.debug(f"阶段转换完成: {previous_phase.value} -> {game.phase.value}")
+            
+            # 发送新阶段的行动提示
+            if self.action_prompt_callback and game.phase != GamePhase.SHOWDOWN:
+                asyncio.create_task(self.action_prompt_callback(game.group_id, game))
             
         except Exception as e:
             logger.error(f"阶段切换时发生错误: {e}")

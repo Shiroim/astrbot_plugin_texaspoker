@@ -86,9 +86,10 @@ class StorageManager:
         try:
             # 首先尝试从AstrBot的标准配置获取
             if self.context:
-                plugin_config = self.context.get_plugin_config(self.plugin_name)
-                if plugin_config and key in plugin_config:
-                    value = plugin_config[key]
+                # 修复: 使用正确的AstrBot配置API
+                plugin_metadata = self.context.get_registered_star(self.plugin_name)
+                if plugin_metadata and plugin_metadata.config and key in plugin_metadata.config:
+                    value = plugin_metadata.config[key]
                     logger.debug(f"从标准配置获取 {key}: {value}")
                     return value
             
@@ -130,9 +131,12 @@ class StorageManager:
             # 如果有AstrBot配置，覆盖本地配置
             if self.context:
                 try:
-                    plugin_config = self.context.get_plugin_config(self.plugin_name)
-                    if plugin_config:
-                        config.update(plugin_config)
+                    # 修复: 使用正确的AstrBot配置API
+                    plugin_metadata = self.context.get_registered_star(self.plugin_name)
+                    if plugin_metadata and plugin_metadata.config:
+                        # 合并插件配置
+                        for k, v in plugin_metadata.config.items():
+                            config[k] = v
                 except Exception as e:
                     logger.debug(f"获取标准配置失败: {e}")
             
