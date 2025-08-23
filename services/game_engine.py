@@ -11,7 +11,6 @@ import time
 from typing import Dict, List, Optional, Tuple, Any
 from ..models.game import TexasHoldemGame, Player, GamePhase, PlayerAction
 from ..models.card import Deck, Card
-from ..utils.data_storage import DataStorage
 from .hand_evaluator import HandEvaluator, HandRank
 from astrbot.api import logger
 
@@ -19,7 +18,7 @@ from astrbot.api import logger
 class GameEngine:
     """德州扑克游戏引擎"""
     
-    def __init__(self, storage: DataStorage, player_service=None):
+    def __init__(self, storage, player_service=None):
         self.storage = storage
         self.player_service = player_service
         self.active_games: Dict[str, TexasHoldemGame] = {}

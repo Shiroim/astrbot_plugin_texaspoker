@@ -4,7 +4,6 @@
 """
 import time
 from typing import Dict, Any, Optional, Tuple
-from ..utils.data_storage import DataStorage
 from ..models.game import Player
 from astrbot.api import logger
 
@@ -12,7 +11,7 @@ from astrbot.api import logger
 class PlayerService:
     """玩家管理服务"""
     
-    def __init__(self, storage: DataStorage):
+    def __init__(self, storage):
         self.storage = storage
     
     def register_player(self, user_id: str, nickname: str, initial_chips: int) -> Tuple[bool, str]:
