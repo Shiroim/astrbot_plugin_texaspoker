@@ -99,7 +99,8 @@ class TexasPokerPlugin(Star):
         existing_player = self.player_service.get_player_info(user_id)
         if existing_player:
             total_chips = existing_player.get('total_chips', 0)
-            yield event.plain_result(f"{nickname}，您已经注册过了！\n当前银行余额: {fmt_chips(total_chips)}")
+            chips_text = fmt_chips(total_chips) if total_chips is not None else "0K"
+            yield event.plain_result(f"{nickname}，您已经注册过了！\n当前银行余额: {chips_text}")
             return
         
         # 获取初始筹码配置 (以K为单位)
@@ -109,9 +110,12 @@ class TexasPokerPlugin(Star):
         success, message = self.player_service.register_player(user_id, nickname, initial_chips)
         
         if success:
-            yield event.plain_result(f"🎉 {nickname} 注册成功！\n💰 获得初始资金: {fmt_chips(initial_chips)}")
+            chips_text = fmt_chips(initial_chips) if initial_chips is not None else "0K"
+            yield event.plain_result(f"🎉 {nickname} 注册成功！\n💰 获得初始资金: {chips_text}")
         else:
-            yield event.plain_result(message)
+            # 确保message是字符串
+            message_text = str(message) if message is not None else "注册失败"
+            yield event.plain_result(message_text)
     
     @command("德州创建")
     @ErrorHandler.game_command_error_handler("游戏创建")
@@ -133,9 +137,14 @@ class TexasPokerPlugin(Star):
             # 获取默认买入金额用于显示
             default_buyin = self.storage.get_plugin_config_value('default_buyin', 50)
             
-            result_msg = (f"{message}\n"
-                         f"小盲注: {fmt_chips(game.small_blind)}, 大盲注: {fmt_chips(game.big_blind)}\n"
-                         f"默认买入: {fmt_chips(default_buyin)}\n"
+            small_blind_text = fmt_chips(game.small_blind) if game.small_blind is not None else "0K"
+            big_blind_text = fmt_chips(game.big_blind) if game.big_blind is not None else "0K"
+            buyin_text = fmt_chips(default_buyin) if default_buyin is not None else "0K"
+            message_text = str(message) if message is not None else "游戏创建成功"
+            
+            result_msg = (f"{message_text}\n"
+                         f"小盲注: {small_blind_text}, 大盲注: {big_blind_text}\n"
+                         f"默认买入: {buyin_text}\n"
                          f"使用 /德州加入 [买入金额] 来加入游戏")
             yield event.plain_result(result_msg)
             
@@ -143,7 +152,9 @@ class TexasPokerPlugin(Star):
             if group_id not in self.temp_files:
                 self.temp_files[group_id] = []
         else:
-            yield event.plain_result(message)
+            # 确保message是字符串
+            message_text = str(message) if message is not None else "创建失败"
+            yield event.plain_result(message_text)
     
     @command("德州加入")
     @ErrorHandler.game_command_error_handler("加入游戏")
@@ -162,15 +173,19 @@ class TexasPokerPlugin(Star):
         max_buyin = self.storage.get_plugin_config_value('max_buyin', 200)  # 200K
         
         if buyin < min_buyin:
-            yield event.plain_result(f"买入金额过少，最少需要 {fmt_chips(min_buyin)}")
+            min_text = fmt_chips(min_buyin) if min_buyin is not None else "0K"
+            yield event.plain_result(f"买入金额过少，最少需要 {min_text}")
             return
         if buyin > max_buyin:
-            yield event.plain_result(f"买入金额过多，最多允许 {fmt_chips(max_buyin)}")
+            max_text = fmt_chips(max_buyin) if max_buyin is not None else "0K"
+            yield event.plain_result(f"买入金额过多，最多允许 {max_text}")
             return
         
         # 使用买入制度加入游戏
         success, message = self.game_engine.join_game_with_buyin(group_id, user_id, nickname, buyin)
-        yield event.plain_result(message)
+        # 确保message是字符串
+        message_text = str(message) if message is not None else "操作失败"
+        yield event.plain_result(message_text)
     
     @command("德州开始")
     @ErrorHandler.game_command_error_handler("开始游戏")
@@ -182,7 +197,9 @@ class TexasPokerPlugin(Star):
         success, message = self.game_engine.start_game(group_id, user_id)
         
         if success:
-            yield event.plain_result(message)
+            # 确保message是字符串
+            message_text = str(message) if message is not None else "开始成功"
+            yield event.plain_result(message_text)
             
             # 发送手牌给每个玩家（私聊）
             await self._send_hand_cards_to_players(group_id)
@@ -192,7 +209,9 @@ class TexasPokerPlugin(Star):
             if community_result:
                 yield community_result
         else:
-            yield event.plain_result(message)
+            # 确保message是字符串
+            message_text = str(message) if message is not None else "开始失败"
+            yield event.plain_result(message_text)
     
     @command("德州状态")
     @ErrorHandler.game_command_error_handler("查看游戏状态")
@@ -209,16 +228,18 @@ class TexasPokerPlugin(Star):
         status_lines = [
             f"🎮 游戏ID: {game.game_id}",
             f"🎯 阶段: {game.phase.value.upper()}",
-            f"💰 底池: {fmt_chips(game.pot)}",
+            f"💰 底池: {fmt_chips(game.pot) if game.pot is not None else '0K'}",
             f"👥 玩家数: {len(game.players)}",
             "",
             "玩家列表:"
         ]
         
         for i, player in enumerate(game.players):
-            status_line = f"{i+1}. {player.nickname} - 筹码: {fmt_chips(player.chips)}"
+            chips_text = fmt_chips(player.chips) if player.chips is not None else "0K"
+            status_line = f"{i+1}. {player.nickname} - 筹码: {chips_text}"
             if player.current_bet > 0:
-                status_line += f" (已下注: {fmt_chips(player.current_bet)})"
+                bet_text = fmt_chips(player.current_bet) if player.current_bet is not None else "0K"
+                status_line += f" (已下注: {bet_text})"
             if player.is_folded:
                 status_line += " (已弃牌)"
             elif player.is_all_in:
@@ -276,7 +297,9 @@ class TexasPokerPlugin(Star):
             group_id = event.get_group_id() or user_id
             
             success, message = self.game_engine.player_action(group_id, user_id, action, amount)
-            yield event.plain_result(message)
+            # 确保message是字符串
+            message_text = str(message) if message is not None else "操作失败"
+            yield event.plain_result(message_text)
             
             if success:
                 # 检查游戏状态变化
@@ -343,7 +366,7 @@ class TexasPokerPlugin(Star):
         help_text = f"""🃏 德州扑克插件帮助
 
 💰 资金系统：
-- 注册获得 {fmt_chips(default_chips)} 银行资金
+- 注册获得 {fmt_chips(default_chips) if default_chips is not None else '500K'} 银行资金
 - 买入制度：每局需买入筹码参与游戏
 - 游戏结束后剩余筹码自动返回银行
 
@@ -352,7 +375,7 @@ class TexasPokerPlugin(Star):
 
 游戏管理：
 /德州创建 [{default_small_blind}] [{default_big_blind}] - 创建游戏 (盲注以K为单位)
-/德州加入 [{default_buyin}] - 加入游戏 (买入金额 {fmt_chips(min_buyin)}-{fmt_chips(max_buyin)})
+/德州加入 [{default_buyin}] - 加入游戏 (买入金额 {fmt_chips(min_buyin) if min_buyin is not None else '10K'}-{fmt_chips(max_buyin) if max_buyin is not None else '200K'})
 /德州开始 - 开始游戏
 /德州状态 - 查看游戏状态
 
@@ -399,11 +422,14 @@ class TexasPokerPlugin(Star):
                                 self.temp_files[group_id] = []
                             self.temp_files[group_id].append(img_path)
                             
+                            # 构建手牌文本内容
+                            card_text = f"🃏 {player.nickname}，您的手牌：{player.hole_cards[0]} {player.hole_cards[1]}"
+                            
                             # 尝试私聊发送手牌
                             private_result = await self._send_private_message(
                                 player.user_id, 
-                                f"🃏 {player.nickname}，您的手牌：",
-                                img_path
+                                player.nickname,
+                                card_text
                             )
                             
                             if not private_result:
@@ -416,35 +442,47 @@ class TexasPokerPlugin(Star):
         except Exception as e:
             logger.error(f"发送手牌失败: {e}")
     
-    async def _send_private_message(self, user_id: str, text: str, image_path: Optional[str] = None) -> bool:
+    async def _send_private_message(self, user_id: str, nickname: str, text: str) -> bool:
         """发送私聊消息"""
         try:
-            # 创建私聊消息
-            components = [text]
-            if image_path and os.path.exists(image_path):
-                components.append(Image.fromFileSystem(image_path))
+            # 获取当前事件的平台信息（需要从其他地方获取，这里暂时模拟）
+            # 在实际使用中，需要通过其他方式获取platform信息
+            platform_name = "aiocqhttp"  # 假设是QQ平台
             
-            # 构建私聊消息对象
-            private_msg = AstrBotMessage()
-            private_msg.message = components
+            # 获取平台适配器
+            adapter = None
+            for adapter_inst in self.context.platform_manager.get_insts():
+                if adapter_inst.meta().name.lower() == platform_name.lower():
+                    adapter = adapter_inst
+                    break
+                    
+            if adapter is None:
+                logger.error(f"未找到 {platform_name} 平台适配器")
+                return False
             
-            # 尝试通过context发送私聊（这里需要根据AstrBot的实际API调整）
-            # 注：实际实现可能需要platform adapter的支持
-            success = await self._try_send_private(user_id, private_msg)
-            return success
-            
+            # 根据平台类型发送私聊消息
+            if platform_name == "aiocqhttp":
+                # QQ平台私聊发送
+                try:
+                    user_id_int = int(user_id)  # 确保user_id为整数
+                    await adapter.bot.send_private_msg(user_id=user_id_int, message=text)
+                    logger.info(f"私聊发送成功，玩家: {nickname}")
+                    return True
+                except Exception as e:
+                    logger.error(f"QQ私聊发送失败（用户可能未添加好友）: {e}")
+                    return False
+            else:
+                # 其他平台（微信等）
+                try:
+                    await adapter.client.post_text(user_id, text)
+                    logger.info(f"私聊发送成功，玩家: {nickname}")
+                    return True
+                except Exception as e:
+                    logger.error(f"私聊发送失败: {e}")
+                    return False
+                    
         except Exception as e:
             logger.error(f"发送私聊消息失败: {e}")
-            return False
-    
-    async def _try_send_private(self, user_id: str, message: AstrBotMessage) -> bool:
-        """尝试发送私聊消息的具体实现"""
-        try:
-            # 这里需要根据AstrBot的具体API来实现
-            # 暂时返回False，表示私聊功能需要进一步开发
-            # TODO: 实现真正的私聊发送功能
-            return False
-        except Exception:
             return False
     
     async def _send_community_cards(self, group_id: str) -> Optional[MessageEventResult]:
