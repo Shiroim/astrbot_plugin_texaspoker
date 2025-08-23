@@ -72,6 +72,7 @@ class Player:
     is_all_in: bool = False           # 是否全下
     position: int = 0                 # 座位位置
     last_action: Optional[PlayerAction] = None  # 最后行动
+    has_acted_this_round: bool = False     # 本轮下注是否已行动
     
     # 统计数据
     total_winnings: int = 0           # 总盈利
@@ -157,6 +158,7 @@ class Player:
         self.is_folded = False
         self.is_all_in = False
         self.last_action = None
+        self.has_acted_this_round = False
         
         # 验证重置是否完成（调试模式下）
         import logging
@@ -167,6 +169,12 @@ class Player:
                     f"弃牌 {old_state['is_folded']}->False, "
                     f"全下 {old_state['is_all_in']}->False, "
                     f"行动 {old_state['last_action']}->None")
+    
+    def reset_for_new_betting_round(self) -> None:
+        """重置玩家状态以开始新的下注轮"""
+        self.current_bet = 0
+        self.has_acted_this_round = False
+        self.last_action = None
     
     def validate_state(self) -> bool:
         """

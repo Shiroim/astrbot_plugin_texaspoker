@@ -475,6 +475,7 @@ class GameEngine:
         if small_blind_amount > 0:
             actual_sb = small_blind_player.bet(small_blind_amount)
             game.pot += actual_sb
+            # 小盲注算作已行动，但在翻牌前大盲注有权利再次行动后，小盲注也可以再次行动
             logger.debug(f"{small_blind_player.nickname} 下小盲注 {actual_sb}")
         
         # 下大盲注
@@ -484,6 +485,7 @@ class GameEngine:
             actual_bb = big_blind_player.bet(big_blind_amount)
             game.pot += actual_bb
             game.current_bet = big_blind_player.current_bet  # 设置当前下注额
+            # 大盲注在翻牌前阶段有权利最后行动，所以不标记为已行动
             logger.debug(f"{big_blind_player.nickname} 下大盲注 {actual_bb}")
         
         # 检查是否有玩家因为盲注而全下
@@ -651,6 +653,9 @@ class GameEngine:
             else:
                 return False, "无效的行动。可用操作：跟注、加注、弃牌、让牌、全下"
             
+            # 标记玩家已在本轮下注中行动
+            player.has_acted_this_round = True
+            
             # 移动到下一个玩家
             self._move_to_next_player(game)
             
@@ -696,7 +701,12 @@ class GameEngine:
     
     def _player_needs_action(self, player: Player, game: TexasHoldemGame) -> bool:
         """
-        检查玩家是否需要行动
+        检查玩家是否需要行动（修复版本）
+        
+        德州扑克下注轮规则：
+        - 每个下注轮开始时，所有未弃牌、未全下的玩家都需要行动一次
+        - 玩家必须要么跟注到当前最高下注额，要么弃牌，要么全下
+        - 只有当所有玩家都行动过且下注额一致时，下注轮才结束
         
         Args:
             player: 玩家对象
@@ -713,13 +723,12 @@ class GameEngine:
         if player.is_all_in:
             return False
             
-        # 检查玩家是否需要跟注或加注
-        if player.current_bet < game.current_bet:
+        # 如果玩家尚未在本轮下注中行动，需要行动
+        if not player.has_acted_this_round:
             return True
             
-        # 如果当前下注为0且玩家也是0，则需要检查是否是新阶段的第一个玩家
-        if game.current_bet == 0 and player.current_bet == 0:
-            # 在新阶段开始时，所有有效玩家都需要机会行动（check或bet）
+        # 如果玩家已行动，但下注不足以跟上当前下注额，仍需行动
+        if player.current_bet < game.current_bet:
             return True
             
         # 其他情况不需要行动
@@ -755,7 +764,11 @@ class GameEngine:
     
     def _is_betting_round_truly_complete(self, game: TexasHoldemGame, active_players: list) -> bool:
         """
-        严格检查下注轮是否真正完成
+        严格检查下注轮是否真正完成（修复版本）
+        
+        下注轮完成的条件：
+        1. 所有未弃牌、未全下的玩家都已行动过
+        2. 所有未弃牌、未全下的玩家下注额都一致（或已弃牌）
         
         Args:
             game: 游戏对象
@@ -771,24 +784,27 @@ class GameEngine:
         if len(non_allin_players) <= 1:
             return True
         
+        # 检查所有非全下玩家是否都已行动
+        for player in non_allin_players:
+            if not player.has_acted_this_round:
+                logger.debug(f"玩家 {player.nickname} 尚未在本轮行动")
+                return False
+        
         # 检查所有非全下玩家的下注是否一致
-        if game.current_bet > 0:
-            # 有下注时，所有非全下玩家必须跟上或弃牌
-            for player in non_allin_players:
-                if player.current_bet < game.current_bet:
-                    return False
-            return True
-        else:
-            # 无下注时（全部check），确认所有玩家都有机会行动过
-            # 这种情况下，如果当前轮没有加注，则算完成
-            return True
+        for player in non_allin_players:
+            if player.current_bet < game.current_bet:
+                logger.debug(f"玩家 {player.nickname} 下注不足：{player.current_bet} < {game.current_bet}")
+                return False
+        
+        logger.debug("下注轮完成：所有玩家已行动且下注一致")
+        return True
     
     async def _advance_to_next_phase(self, game: TexasHoldemGame):
         """进入下一游戏阶段"""
         try:
-            # 重置所有玩家的下注状态
+            # 重置所有玩家的下注状态和行动状态
             for player in game.players:
-                player.current_bet = 0
+                player.reset_for_new_betting_round()
             game.current_bet = 0
             
             # 设置下一阶段的行动玩家（小盲注位置开始）
@@ -1138,6 +1154,7 @@ class GameEngine:
                 
                 # 执行超时弃牌
                 active_player.fold()
+                active_player.has_acted_this_round = True  # 标记已行动
                 game.update_last_action_time()
                 
                 # 移动到下一个玩家
