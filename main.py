@@ -210,11 +210,11 @@ class TexasPokerPlugin(Star):
             hand_images = {}
             for player in game.players:
                 if len(player.hole_cards) >= 2:
-                        # 渲染手牌图片
+                    # 渲染手牌图片
                     hand_img = self.game_controller.renderer.render_hand_cards(player, game)
-                        filename = f"hand_{player.user_id}_{game.game_id}.png"
+                    filename = f"hand_{player.user_id}_{game.game_id}.png"
                     img_path = self.game_controller.renderer.save_image(hand_img, filename)
-                        if img_path:
+                    if img_path:
                         hand_images[player.user_id] = img_path
                         # 添加到临时文件跟踪
                         self.game_controller.temp_files.setdefault(group_id, []).append(img_path)
