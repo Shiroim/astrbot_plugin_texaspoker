@@ -137,12 +137,73 @@ class Player:
             self.chips += amount
     
     def reset_for_new_hand(self) -> None:
-        """重置玩家状态以开始新一手牌"""
+        """重置玩家状态以开始新一手牌（增强版本）"""
+        # 保存重置前的状态用于验证
+        old_state = {
+            'hole_cards': len(self.hole_cards),
+            'current_bet': self.current_bet,
+            'is_folded': self.is_folded,
+            'is_all_in': self.is_all_in,
+            'last_action': self.last_action
+        }
+        
+        # 重置手牌相关状态
         self.hole_cards = []
+        
+        # 重置下注相关状态
         self.current_bet = 0
+        
+        # 重置玩家行动状态
         self.is_folded = False
         self.is_all_in = False
         self.last_action = None
+        
+        # 验证重置是否完成（调试模式下）
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"玩家 {self.nickname} 状态重置: "
+                    f"手牌 {old_state['hole_cards']}->0, "
+                    f"下注 {old_state['current_bet']}->0, "
+                    f"弃牌 {old_state['is_folded']}->False, "
+                    f"全下 {old_state['is_all_in']}->False, "
+                    f"行动 {old_state['last_action']}->None")
+    
+    def validate_state(self) -> bool:
+        """
+        验证玩家状态的一致性
+        
+        Returns:
+            True表示状态一致，False表示状态异常
+        """
+        try:
+            # 检查基本字段类型
+            if not isinstance(self.chips, (int, float)) or self.chips < 0:
+                return False
+            
+            if not isinstance(self.current_bet, (int, float)) or self.current_bet < 0:
+                return False
+            
+            if not isinstance(self.hole_cards, list):
+                return False
+            
+            # 检查逻辑一致性
+            if self.is_all_in and self.chips > 0:
+                # 全下的玩家不应该有剩余筹码
+                return False
+            
+            if self.is_folded and self.current_bet > 0:
+                # 弃牌的玩家在新轮次开始时不应该有下注
+                # 注意：这里只检查新轮次，不检查同一轮次内的状态
+                pass
+            
+            # 检查手牌数量
+            if len(self.hole_cards) > 2:
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""

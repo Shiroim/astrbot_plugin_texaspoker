@@ -24,6 +24,7 @@ class GameEngine:
         self.player_service = player_service
         self.active_games: Dict[str, TexasHoldemGame] = {}
         self.timeouts: Dict[str, asyncio.Task] = {}
+        self.timeout_locks: Dict[str, asyncio.Lock] = {}  # 防止超时操作的竞态条件
     
     def create_game(self, group_id: str, creator_id: str, creator_nickname: str,
                    small_blind: Optional[int] = None, big_blind: Optional[int] = None) -> Tuple[bool, str, Optional[TexasHoldemGame]]:
@@ -347,9 +348,22 @@ class GameEngine:
             game: 游戏对象
         """
         try:
-            # 重置所有玩家状态
+            # 重置所有玩家状态（增强版本）
             for player in game.players:
+                # 重置玩家状态
                 player.reset_for_new_hand()
+                
+                # 验证重置后的状态
+                if not player.validate_state():
+                    logger.warning(f"玩家 {player.nickname} 状态重置后验证失败")
+                    # 尝试修复常见问题
+                    if player.chips < 0:
+                        player.chips = 0
+                    if player.current_bet < 0:
+                        player.current_bet = 0
+                    
+                # 记录玩家状态
+                logger.debug(f"玩家 {player.nickname} 重置完成: 筹码{player.chips}, 位置{player.position}")
             
             # 重置游戏状态
             game.community_cards = []
@@ -393,15 +407,37 @@ class GameEngine:
             raise
     
     def _set_first_action_player(self, game: TexasHoldemGame) -> None:
-        """设置第一个行动玩家"""
+        """设置第一个行动玩家（翻牌前专用，重写的精确逻辑）"""
         player_count = len(game.players)
         
+        if player_count < 2:
+            logger.error("玩家数量不足，无法设置第一个行动玩家")
+            return
+        
+        # 翻牌前的行动顺序规则
         if player_count == 2:
-            # heads-up: 庄家（小盲）先行动
-            game.active_player_index = game.dealer_index
+            # heads-up: 庄家（小盲注）先行动
+            first_to_act_index = game.dealer_index
         else:
-            # 多人游戏: 大盲注后一位先行动
-            game.active_player_index = (game.dealer_index + 3) % player_count
+            # 多人游戏: 大盲注左侧的玩家（Under The Gun, UTG）先行动
+            first_to_act_index = (game.dealer_index + 3) % player_count
+        
+        # 确保第一个行动的玩家是有效的（未弃牌且未全下）
+        attempts = 0
+        while attempts < player_count:
+            player = game.players[first_to_act_index]
+            if not player.is_folded and not player.is_all_in:
+                game.active_player_index = first_to_act_index
+                logger.debug(f"翻牌前第一个行动玩家: {player.nickname} (索引: {first_to_act_index})")
+                return
+            
+            # 移动到下一个玩家
+            first_to_act_index = (first_to_act_index + 1) % player_count
+            attempts += 1
+        
+        # 如果没有找到有效玩家（理论上不应该发生）
+        logger.warning("翻牌前未找到有效的第一个行动玩家，使用默认位置")
+        game.active_player_index = (game.dealer_index + 3) % player_count if player_count > 2 else game.dealer_index
     
     def _post_blinds(self, game: TexasHoldemGame) -> None:
         """
@@ -451,7 +487,7 @@ class GameEngine:
             big_blind_player.is_all_in = True
             logger.info(f"{big_blind_player.nickname} 因大盲注全下")
     
-    def player_action(self, group_id: str, user_id: str, action: str, amount: int = 0) -> Tuple[bool, str]:
+    async def player_action(self, group_id: str, user_id: str, action: str, amount: int = 0) -> Tuple[bool, str]:
         """
         处理玩家行动
         
@@ -501,7 +537,7 @@ class GameEngine:
                 game.update_last_action_time()
                 
                 # 检查是否需要进入下一阶段
-                self._check_betting_round_complete(game)
+                await self._check_betting_round_complete(game)
                 
                 # 检测阶段变化，并在消息中标记
                 if game.phase != previous_phase:
@@ -617,44 +653,124 @@ class GameEngine:
             return False, "处理行动时发生错误"
     
     def _move_to_next_player(self, game: TexasHoldemGame):
-        """移动到下一个有效玩家"""
-        start_index = game.active_player_index
+        """移动到下一个有效玩家（完全重写的状态机逻辑）"""
+        if len(game.players) == 0:
+            logger.warning("没有玩家可以移动到下一个")
+            return
         
-        while True:
+        original_player_index = game.active_player_index
+        attempts = 0
+        max_attempts = len(game.players)
+        
+        while attempts < max_attempts:
+            # 移动到下一个玩家
             game.active_player_index = (game.active_player_index + 1) % len(game.players)
             next_player = game.players[game.active_player_index]
+            attempts += 1
             
-            # 如果回到起始位置，说明下注轮结束
-            if game.active_player_index == start_index:
+            # 检查玩家是否需要行动
+            if self._player_needs_action(next_player, game):
+                logger.debug(f"下一个行动玩家: {next_player.nickname} (索引: {game.active_player_index})")
+                return
+                
+            # 如果回到原始玩家，说明这轮下注完成
+            if game.active_player_index == original_player_index:
+                logger.debug("所有玩家已完成本轮下注")
                 break
-            
-            # 找到下一个有效玩家（未弃牌且未全下）
-            if not next_player.is_folded and not next_player.is_all_in:
-                # 检查是否需要行动（未跟上当前下注）
-                if next_player.current_bet < game.current_bet:
-                    break
+        
+        # 如果没有找到需要行动的玩家，下注轮结束
+        logger.debug("本轮下注结束，没有玩家需要继续行动")
     
-    def _check_betting_round_complete(self, game: TexasHoldemGame):
-        """检查下注轮是否结束"""
+    def _player_needs_action(self, player: Player, game: TexasHoldemGame) -> bool:
+        """
+        检查玩家是否需要行动
+        
+        Args:
+            player: 玩家对象
+            game: 游戏对象
+            
+        Returns:
+            True表示玩家需要行动，False表示不需要
+        """
+        # 已弃牌的玩家不需要行动
+        if player.is_folded:
+            return False
+            
+        # 已全下的玩家不需要行动
+        if player.is_all_in:
+            return False
+            
+        # 检查玩家是否需要跟注或加注
+        if player.current_bet < game.current_bet:
+            return True
+            
+        # 如果当前下注为0且玩家也是0，则需要检查是否是新阶段的第一个玩家
+        if game.current_bet == 0 and player.current_bet == 0:
+            # 在新阶段开始时，所有有效玩家都需要机会行动（check或bet）
+            return True
+            
+        # 其他情况不需要行动
+        return False
+    
+    async def _check_betting_round_complete(self, game: TexasHoldemGame):
+        """检查下注轮是否结束（重写的严格逻辑）"""
         active_players = [p for p in game.players if not p.is_folded]
         
         # 如果只剩一个玩家，直接结束游戏
         if len(active_players) <= 1:
-            self._end_game(game)
+            logger.info(f"游戏 {game.game_id} 只剩一个玩家，直接结束")
+            await self._end_game(game)
             return
         
-        # 检查所有有效玩家是否都已跟注或全下
-        betting_complete = True
+        # 检查是否还有玩家需要行动
+        players_needing_action = []
         for player in active_players:
-            if not player.is_all_in and player.current_bet < game.current_bet:
-                betting_complete = False
-                break
+            if self._player_needs_action(player, game):
+                players_needing_action.append(player.nickname)
         
-        if betting_complete:
-            # 进入下一阶段
-            self._advance_to_next_phase(game)
+        if players_needing_action:
+            # 还有玩家需要行动，下注轮未完成
+            logger.debug(f"还有玩家需要行动: {', '.join(players_needing_action)}")
+            return
+        
+        # 所有玩家都完成了行动，检查下注轮是否真的结束
+        if self._is_betting_round_truly_complete(game, active_players):
+            logger.info(f"游戏 {game.game_id} 下注轮完成，进入下一阶段")
+            await self._advance_to_next_phase(game)
+        else:
+            logger.debug(f"游戏 {game.game_id} 下注轮未真正完成，继续等待")
     
-    def _advance_to_next_phase(self, game: TexasHoldemGame):
+    def _is_betting_round_truly_complete(self, game: TexasHoldemGame, active_players: list) -> bool:
+        """
+        严格检查下注轮是否真正完成
+        
+        Args:
+            game: 游戏对象
+            active_players: 仍在游戏中的玩家列表
+            
+        Returns:
+            True表示下注轮完成，False表示未完成
+        """
+        # 获取非全下玩家
+        non_allin_players = [p for p in active_players if not p.is_all_in]
+        
+        # 如果只有全下玩家，下注轮完成
+        if len(non_allin_players) <= 1:
+            return True
+        
+        # 检查所有非全下玩家的下注是否一致
+        if game.current_bet > 0:
+            # 有下注时，所有非全下玩家必须跟上或弃牌
+            for player in non_allin_players:
+                if player.current_bet < game.current_bet:
+                    return False
+            return True
+        else:
+            # 无下注时（全部check），确认所有玩家都有机会行动过
+            # 这种情况下，如果当前轮没有加注，则算完成
+            return True
+    
+    async def _advance_to_next_phase(self, game: TexasHoldemGame):
         """进入下一游戏阶段"""
         try:
             # 重置所有玩家的下注状态
@@ -695,7 +811,7 @@ class GameEngine:
             elif game.phase == GamePhase.RIVER:
                 # 摊牌阶段
                 logger.info(f"游戏 {game.game_id} 进入摊牌阶段")
-                self._showdown(game)
+                await self._showdown(game)
                 return
             
             # 检查是否所有有效玩家都已全下，如果是则直接跳到摊牌
@@ -708,7 +824,7 @@ class GameEngine:
                 if game.phase != GamePhase.RIVER:
                     # 快速发完剩余公共牌
                     self._deal_remaining_community_cards(game, deck)
-                self._showdown(game)
+                await self._showdown(game)
                 return
             
             game.update_last_action_time()
@@ -744,20 +860,34 @@ class GameEngine:
             logger.error(f"发剩余公共牌时出错: {e}")
     
     def _set_first_to_act(self, game: TexasHoldemGame):
-        """设置第一个行动的玩家（小盲注位置开始）"""
-        small_blind_index = (game.dealer_index + 1) % len(game.players)
-        if len(game.players) == 2:
-            small_blind_index = game.dealer_index
+        """设置第一个行动的玩家（重写的精确逻辑）"""
+        player_count = len(game.players)
+        if player_count == 0:
+            logger.warning("没有玩家，无法设置第一个行动者")
+            return
         
-        # 找到小盲注之后第一个有效玩家
-        for i in range(len(game.players)):
-            check_index = (small_blind_index + i) % len(game.players)
+        # 在翻牌后阶段，从小盲注开始（如果小盲注还在游戏中）
+        # 如果是heads-up（2人），庄家是小盲注
+        if player_count == 2:
+            start_index = game.dealer_index  # 庄家/小盲注先行动
+        else:
+            start_index = (game.dealer_index + 1) % player_count  # 小盲注位置
+        
+        # 找到第一个有效的玩家（未弃牌且未全下）
+        for i in range(player_count):
+            check_index = (start_index + i) % player_count
             player = game.players[check_index]
+            
             if not player.is_folded and not player.is_all_in:
                 game.active_player_index = check_index
-                break
+                logger.debug(f"设置第一个行动玩家: {player.nickname} (索引: {check_index})")
+                return
+        
+        # 如果没有找到有效玩家（理论上不应该发生）
+        logger.warning("未找到有效的第一个行动玩家")
+        game.active_player_index = start_index
     
-    def _showdown(self, game: TexasHoldemGame):
+    async def _showdown(self, game: TexasHoldemGame):
         """摊牌阶段"""
         game.phase = GamePhase.SHOWDOWN
         
@@ -776,7 +906,7 @@ class GameEngine:
         self._distribute_pot(game, player_hands)
         
         # 结束游戏
-        self._end_game(game)
+        await self._end_game(game)
     
     def _distribute_pot(self, game: TexasHoldemGame, player_hands: List[Tuple[Player, HandRank, List[int]]]):
         """分配奖池"""
@@ -813,7 +943,7 @@ class GameEngine:
                 hands_won=1
             )
     
-    def _end_game(self, game: TexasHoldemGame) -> None:
+    async def _end_game(self, game: TexasHoldemGame) -> None:
         """
         结束游戏并清理资源
         
@@ -856,13 +986,8 @@ class GameEngine:
             # 删除存储中的游戏数据
             self.storage.delete_game(game.group_id)
             
-            # 清理超时任务
-            if game.group_id in self.timeouts:
-                try:
-                    self.timeouts[game.group_id].cancel()
-                except Exception as e:
-                    logger.warning(f"取消超时任务失败: {e}")
-                del self.timeouts[game.group_id]
+            # 安全清理超时任务
+            await self._safe_cleanup_timeout(game.group_id)
             
             logger.info(f"游戏结束: {game.game_id}, 参与玩家: {len(game.players)}人")
             
@@ -897,52 +1022,173 @@ class GameEngine:
             logger.error(f"保存游戏历史失败: {e}")
     
     def _start_timeout_check(self, group_id: str):
-        """启动超时检查"""
-        if group_id in self.timeouts:
-            self.timeouts[group_id].cancel()
+        """启动超时检查（线程安全版本）"""
+        # 创建异步任务来处理超时检查，避免阻塞
+        asyncio.create_task(self._async_start_timeout_check(group_id))
+    
+    async def _async_start_timeout_check(self, group_id: str):
+        """异步启动超时检查，防止竞态条件"""
+        try:
+            # 确保该组有锁
+            if group_id not in self.timeout_locks:
+                self.timeout_locks[group_id] = asyncio.Lock()
+            
+            # 使用锁防止竞态条件
+            async with self.timeout_locks[group_id]:
+                # 取消现有的超时任务
+                if group_id in self.timeouts:
+                    old_task = self.timeouts[group_id]
+                    if not old_task.done():
+                        old_task.cancel()
+                        try:
+                            await old_task
+                        except asyncio.CancelledError:
+                            pass
+                    del self.timeouts[group_id]
+                
+                # 检查游戏是否还存在且需要超时检查
+                if group_id in self.active_games:
+                    game = self.active_games[group_id]
+                    if game.phase in [GamePhase.PRE_FLOP, GamePhase.FLOP, GamePhase.TURN, GamePhase.RIVER]:
+                        # 启动新的超时任务
+                        self.timeouts[group_id] = asyncio.create_task(
+                            self._timeout_check(group_id)
+                        )
+                        logger.debug(f"为游戏 {group_id} 启动超时检查")
         
-        self.timeouts[group_id] = asyncio.create_task(
-            self._timeout_check(group_id)
-        )
+        except Exception as e:
+            logger.error(f"启动超时检查失败: {e}")
     
     async def _timeout_check(self, group_id: str):
-        """超时检查任务"""
+        """超时检查任务（增强的线程安全版本）"""
+        timeout_start_time = time.time()
+        
         try:
+            # 检查游戏是否存在
             if group_id not in self.active_games:
+                logger.debug(f"游戏 {group_id} 不存在，取消超时检查")
                 return
             
             game = self.active_games[group_id]
+            initial_phase = game.phase
+            initial_last_action_time = game.last_action_time
+            
+            # 等待超时时间
             await asyncio.sleep(game.timeout_seconds)
             
-            # 检查游戏是否还在进行且确实超时
-            if (group_id in self.active_games and 
-                game.phase in [GamePhase.PRE_FLOP, GamePhase.FLOP, GamePhase.TURN, GamePhase.RIVER] and
-                game.is_timeout()):
+            # 使用锁进行超时处理，防止与其他操作冲突
+            if group_id not in self.timeout_locks:
+                self.timeout_locks[group_id] = asyncio.Lock()
                 
-                # 当前玩家超时，自动弃牌
+            async with self.timeout_locks[group_id]:
+                # 重新检查游戏状态（可能在等待期间已改变）
+                if group_id not in self.active_games:
+                    logger.debug(f"游戏 {group_id} 已结束，取消超时处理")
+                    return
+                
+                game = self.active_games[group_id]
+                
+                # 检查游戏阶段是否改变（说明已有其他操作）
+                if game.phase != initial_phase:
+                    logger.debug(f"游戏 {group_id} 阶段已改变 ({initial_phase} -> {game.phase})，取消超时处理")
+                    return
+                
+                # 检查最后行动时间是否改变（说明有新的行动）
+                if game.last_action_time != initial_last_action_time:
+                    logger.debug(f"游戏 {group_id} 已有新行动，取消超时处理")
+                    return
+                
+                # 严格检查是否真的超时
+                current_time = time.time()
+                time_since_last_action = current_time - game.last_action_time
+                
+                if time_since_last_action < game.timeout_seconds:
+                    logger.debug(f"游戏 {group_id} 未真正超时 ({time_since_last_action:.1f}s < {game.timeout_seconds}s)")
+                    return
+                
+                # 确认游戏在可超时的阶段
+                if game.phase not in [GamePhase.PRE_FLOP, GamePhase.FLOP, GamePhase.TURN, GamePhase.RIVER]:
+                    logger.debug(f"游戏 {group_id} 不在可超时阶段: {game.phase}")
+                    return
+                
+                # 获取当前行动玩家并执行超时处理
                 active_player = game.get_active_player()
-                if active_player and not active_player.is_folded:
-                    logger.info(f"玩家 {active_player.nickname} 超时自动弃牌")
-                    active_player.fold()
-                    game.update_last_action_time()
+                if not active_player or active_player.is_folded:
+                    logger.debug(f"游戏 {group_id} 没有有效的行动玩家")
+                    return
+                
+                logger.info(f"游戏 {group_id} 玩家 {active_player.nickname} 超时自动弃牌")
+                
+                # 执行超时弃牌
+                active_player.fold()
+                game.update_last_action_time()
+                
+                # 移动到下一个玩家
+                self._move_to_next_player(game)
+                
+                # 检查下注轮是否结束
+                await self._check_betting_round_complete(game)
+                
+                # 保存游戏状态
+                self.storage.save_game(group_id, game.to_dict())
+                
+                # 如果游戏还在进行，启动下一轮超时检查
+                if (group_id in self.active_games and 
+                    game.phase in [GamePhase.PRE_FLOP, GamePhase.FLOP, GamePhase.TURN, GamePhase.RIVER]):
                     
-                    # 移动到下一个玩家
-                    self._move_to_next_player(game)
-                    
-                    # 检查下注轮是否结束
-                    self._check_betting_round_complete(game)
-                    
-                    # 保存游戏状态
-                    self.storage.save_game(group_id, game.to_dict())
-                    
-                    # 如果游戏还在进行，继续超时检查
-                    if game.phase in [GamePhase.PRE_FLOP, GamePhase.FLOP, GamePhase.TURN, GamePhase.RIVER]:
+                    next_active_player = game.get_active_player()
+                    if next_active_player:
+                        logger.debug(f"游戏 {group_id} 继续超时检查，下一个玩家: {next_active_player.nickname}")
                         self._start_timeout_check(group_id)
+                    else:
+                        logger.debug(f"游戏 {group_id} 没有下一个行动玩家")
             
         except asyncio.CancelledError:
+            # 任务被取消，这是正常情况
+            logger.debug(f"游戏 {group_id} 超时检查任务被取消")
             pass
         except Exception as e:
-            logger.error(f"超时检查任务出错: {e}")
+            logger.error(f"游戏 {group_id} 超时检查任务出错: {e}")
+        finally:
+            # 清理超时任务记录
+            try:
+                if group_id in self.timeouts and not self.timeouts[group_id].done():
+                    pass  # 任务仍在运行，不删除
+                elif group_id in self.timeouts:
+                    del self.timeouts[group_id]
+            except Exception as e:
+                logger.warning(f"清理超时任务记录失败: {e}")
+    
+    async def _safe_cleanup_timeout(self, group_id: str):
+        """安全清理超时任务（防止竞态条件）"""
+        try:
+            # 确保有锁
+            if group_id not in self.timeout_locks:
+                self.timeout_locks[group_id] = asyncio.Lock()
+            
+            async with self.timeout_locks[group_id]:
+                if group_id in self.timeouts:
+                    task = self.timeouts[group_id]
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    del self.timeouts[group_id]
+                    logger.debug(f"已安全清理游戏 {group_id} 的超时任务")
+                
+                # 清理锁（如果不再需要）
+                if group_id not in self.active_games:
+                    if group_id in self.timeout_locks:
+                        del self.timeout_locks[group_id]
+                        
+        except Exception as e:
+            logger.warning(f"安全清理超时任务失败 {group_id}: {e}")
+    
+    def _cleanup_timeout_sync(self, group_id: str):
+        """同步版本的超时清理（用于同步方法）"""
+        asyncio.create_task(self._safe_cleanup_timeout(group_id))
     
     def get_game_state(self, group_id: str) -> Optional[TexasHoldemGame]:
         """获取游戏状态"""
@@ -961,12 +1207,7 @@ class GameEngine:
                     self.storage.delete_game(group_id)
                     
                     # 清理超时任务
-                    if group_id in self.timeouts:
-                        try:
-                            self.timeouts[group_id].cancel()
-                        except Exception as e:
-                            logger.warning(f"取消超时任务失败: {e}")
-                        del self.timeouts[group_id]
+                    self._cleanup_timeout_sync(group_id)
                     
                     logger.info(f"已清理结束的游戏: {game.game_id}")
                     return True

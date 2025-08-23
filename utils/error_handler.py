@@ -3,9 +3,40 @@
 提供统一的错误处理和日志记录功能
 """
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable
+from typing import Any, AsyncGenerator, Callable, Optional
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
+
+
+class GameError(Exception):
+    """游戏逻辑错误基类"""
+    
+    def __init__(self, title: str, detail: str = "", suggestions: Optional[list] = None):
+        self.title = title
+        self.detail = detail
+        self.suggestions = suggestions or []
+        super().__init__(f"{title}: {detail}")
+
+
+class ValidationError(GameError):
+    """参数验证错误"""
+    
+    def __init__(self, message: str):
+        super().__init__("参数验证失败", message, ["请检查输入参数", "确认参数格式正确"])
+
+
+class GameStateError(GameError):
+    """游戏状态错误"""
+    
+    def __init__(self, message: str, suggestions: Optional[list] = None):
+        super().__init__("游戏状态错误", message, suggestions or ["检查游戏当前状态", "重新开始游戏"])
+
+
+class PlayerError(GameError):
+    """玩家操作错误"""
+    
+    def __init__(self, message: str):
+        super().__init__("玩家操作错误", message, ["确认玩家已注册", "检查玩家状态"])
 
 
 class ErrorHandler:
