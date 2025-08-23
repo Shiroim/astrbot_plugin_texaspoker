@@ -935,11 +935,46 @@ class GameEngine:
         # 按手牌强度排序
         player_hands.sort(key=lambda x: (x[1].value, x[2]), reverse=True)
         
+        # 保存摊牌结果到游戏对象，供后续发送结果使用
+        game.showdown_results = {
+            'player_hands': player_hands,
+            'winners': self._determine_winners(player_hands),
+            'pot_distribution': []  # 将在分配奖池时填充
+        }
+        
         # 分配奖池
         self._distribute_pot(game, player_hands)
         
+        # 发送摊牌结果（如果有回调）
+        if self.action_prompt_callback:
+            try:
+                await self.action_prompt_callback(game.group_id, game)
+            except Exception as e:
+                logger.error(f"发送摊牌结果失败: {e}")
+        
         # 结束游戏
         await self._end_game(game)
+    
+    def _determine_winners(self, player_hands: List[Tuple[Player, 'HandRank', List[int]]]) -> List[Player]:
+        """确定获胜者（处理并列情况）"""
+        if not player_hands:
+            return []
+        
+        # 最强的手牌
+        best_hand = player_hands[0]
+        winners = [best_hand[0]]
+        
+        # 找出所有并列的获胜者
+        for player, rank, values in player_hands[1:]:
+            # 使用HandEvaluator比较手牌
+            from ..utils.hand_evaluator import HandEvaluator
+            comparison = HandEvaluator.compare_hands((rank, values), (best_hand[1], best_hand[2]))
+            if comparison == 0:  # 平手
+                winners.append(player)
+            else:
+                break  # 后面的都是更弱的手牌
+        
+        return winners
     
     def _distribute_pot(self, game: TexasHoldemGame, player_hands: List[Tuple[Player, HandRank, List[int]]]):
         """分配奖池 - 支持边池处理"""
@@ -992,6 +1027,14 @@ class GameEngine:
                     winner.hands_won += 1
                     
                     logger.info(f"玩家 {winner.nickname} 从边池 {i+1} 获得 {share} 筹码")
+                    
+                    # 记录奖池分配信息（用于摊牌结果显示）
+                    if hasattr(game, 'showdown_results') and game.showdown_results:
+                        game.showdown_results['pot_distribution'].append({
+                            'winner': winner.nickname,
+                            'amount': share,
+                            'pot_number': i+1
+                        })
                     
                     # 更新统计数据
                     self.storage.update_player_stats(

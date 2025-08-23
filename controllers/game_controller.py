@@ -258,15 +258,22 @@ class GameController:
             
             # 检查是否游戏结束，生成结算图片
             if game.phase == GamePhase.SHOWDOWN:
-                active_players = [p for p in game.players if not p.is_folded]
-                winners = active_players[:1]  # 简化处理
+                # 获取正确的获胜者信息
+                winners = []
+                if hasattr(game, 'showdown_results') and game.showdown_results:
+                    winners = game.showdown_results['winners']
+                else:
+                    # 备用方案：简化处理
+                    active_players = [p for p in game.players if not p.is_folded]
+                    winners = active_players[:1] if active_players else []
                 
-                showdown_img = self.renderer.render_showdown(game, winners)
-                showdown_filename = f"showdown_{game.game_id}.png"
-                showdown_path = self.renderer.save_image(showdown_img, showdown_filename)
-                if showdown_path:
-                    self.temp_files[group_id].append(showdown_path)
-                    result['showdown_image'] = showdown_path
+                if winners:
+                    showdown_img = self.renderer.render_showdown(game, winners)
+                    showdown_filename = f"showdown_{game.game_id}.png"
+                    showdown_path = self.renderer.save_image(showdown_img, showdown_filename)
+                    if showdown_path:
+                        self.temp_files[group_id].append(showdown_path)
+                        result['showdown_image'] = showdown_path
             
             result['game_info'] = self._build_game_info(game)
             

@@ -235,15 +235,142 @@ class TexasPokerPlugin(Star):
         except Exception as e:
             logger.error(f"发送手牌失败: {e}")
     
-    async def _send_action_prompt_message(self, group_id: str, message: str) -> None:
-        """发送行动提示消息到群聊"""
+    async def _send_action_prompt_message(self, group_id: str, game_or_message) -> None:
+        """发送行动提示消息到群聊或处理游戏结果"""
         try:
-            # 通过消息服务发送到群聊
-            success = await self.message_service.send_group_text(group_id, message)
-            if not success:
-                logger.warning(f"发送行动提示消息失败: {group_id}")
-                except Exception as e:
+            # 判断是游戏对象还是普通消息
+            if hasattr(game_or_message, 'phase'):
+                # 是游戏对象，根据阶段处理
+                await self._handle_game_phase_message(group_id, game_or_message)
+            else:
+                # 是普通消息字符串
+                success = await self.message_service.send_group_text(group_id, str(game_or_message))
+                if not success:
+                    logger.warning(f"发送行动提示消息失败: {group_id}")
+        except Exception as e:
             logger.error(f"发送行动提示消息异常: {e}")
+    
+    async def _handle_game_phase_message(self, group_id: str, game) -> None:
+        """处理游戏阶段的特殊消息（如摊牌结果）"""
+        try:
+            from .models.game import GamePhase
+            
+            if game.phase == GamePhase.SHOWDOWN:
+                # 摊牌阶段，发送游戏结果
+                await self._send_showdown_results(group_id, game)
+            else:
+                # 普通行动阶段，发送行动提示
+                active_player = game.get_active_player()
+                if active_player:
+                    prompt_message = self._build_action_prompt_message(game, active_player)
+                    success = await self.message_service.send_group_text(group_id, prompt_message)
+                    if not success:
+                        logger.warning(f"发送行动提示失败: {group_id}")
+        except Exception as e:
+            logger.error(f"处理游戏阶段消息失败: {e}")
+    
+    async def _send_showdown_results(self, group_id: str, game) -> None:
+        """发送摊牌结果"""
+        try:
+            # 生成摊牌图片
+            result_data = self.game_controller.generate_action_result_images(group_id, game, "摊牌")
+            
+            # 发送摊牌结果文本
+            if hasattr(game, 'showdown_results'):
+                result_message = self._build_showdown_message(game)
+                success = await self.message_service.send_group_text(group_id, result_message)
+                if not success:
+                    logger.warning(f"发送摊牌结果文本失败: {group_id}")
+            
+            # 发送摊牌图片
+            if result_data and result_data.get('showdown_image'):
+                success = await self.message_service.send_group_image(group_id, result_data['showdown_image'])
+                if not success:
+                    logger.warning(f"发送摊牌图片失败: {group_id}")
+                    
+        except Exception as e:
+            logger.error(f"发送摊牌结果失败: {e}")
+    
+    def _build_action_prompt_message(self, game, active_player) -> str:
+        """构建行动提示消息"""
+        from .utils.money_formatter import fmt_chips
+        
+        prompt_parts = [
+            f"🎮 轮到 {active_player.nickname} 行动",
+            f"💰 当前下注: {fmt_chips(game.current_bet)}",
+            f"🎯 可用筹码: {fmt_chips(active_player.chips)}"
+        ]
+        
+        # 添加可用操作提示
+        available_actions = []
+        if active_player.current_bet < game.current_bet:
+            need_amount = game.current_bet - active_player.current_bet
+            available_actions.append(f"跟注 {fmt_chips(need_amount)}")
+        else:
+            available_actions.append("让牌")
+        
+        available_actions.extend(["加注", "弃牌"])
+        if active_player.chips > 0:
+            available_actions.append("全下")
+        
+        prompt_parts.append(f"📋 可用操作: {' | '.join(available_actions)}")
+        
+        return "\n".join(prompt_parts)
+    
+    def _build_showdown_message(self, game) -> str:
+        """构建摊牌结果消息"""
+        from .utils.money_formatter import fmt_chips
+        
+        if not hasattr(game, 'showdown_results'):
+            return "🎊 游戏结束！"
+        
+        results = game.showdown_results
+        message_parts = [
+            "🎊 德州扑克 - 游戏结束！",
+            "=" * 25
+        ]
+        
+        # 显示所有玩家的手牌
+        message_parts.append("🃏 玩家手牌:")
+        for player, hand_rank, values in results['player_hands']:
+            hand_name = self._get_hand_rank_name(hand_rank)
+            message_parts.append(f"　{player.nickname}: {hand_name}")
+        
+        # 显示获胜者
+        winners = results['winners']
+        if len(winners) == 1:
+            message_parts.extend([
+                "",
+                f"🏆 获胜者: {winners[0].nickname}",
+                f"💰 奖池: {fmt_chips(game.pot)}"
+            ])
+        else:
+            winner_names = [w.nickname for w in winners]
+            message_parts.extend([
+                "",
+                f"🏆 并列获胜: {' | '.join(winner_names)}",
+                f"💰 平分奖池: {fmt_chips(game.pot)}"
+            ])
+        
+        return "\n".join(message_parts)
+    
+    def _get_hand_rank_name(self, hand_rank) -> str:
+        """获取手牌等级的中文名称"""
+        hand_names = {
+            'ROYAL_FLUSH': '皇家同花顺',
+            'STRAIGHT_FLUSH': '同花顺', 
+            'FOUR_OF_A_KIND': '四条',
+            'FULL_HOUSE': '葫芦',
+            'FLUSH': '同花',
+            'STRAIGHT': '顺子',
+            'THREE_OF_A_KIND': '三条',
+            'TWO_PAIR': '两对',
+            'PAIR': '一对',
+            'HIGH_CARD': '高牌'
+        }
+        
+        rank_name = hand_rank.name if hasattr(hand_rank, 'name') else str(hand_rank)
+        return hand_names.get(rank_name, rank_name)
     
     async def get_plugin_status(self) -> Dict[str, Any]:
         """获取插件状态（用于监控和调试）"""
