@@ -942,39 +942,133 @@ class GameEngine:
         await self._end_game(game)
     
     def _distribute_pot(self, game: TexasHoldemGame, player_hands: List[Tuple[Player, HandRank, List[int]]]):
-        """分配奖池"""
-        # 简化处理：暂不考虑边池，直接按手牌强度分配
+        """分配奖池 - 支持边池处理"""
         if not player_hands:
             return
         
-        # 找出最强的手牌
-        best_hand = player_hands[0]
-        winners = [best_hand[0]]
+        # 创建边池系统
+        side_pots = self._create_side_pots(game)
         
-        # 找出所有并列的获胜者
-        for player, rank, values in player_hands[1:]:
-            comparison = HandEvaluator.compare_hands((rank, values), (best_hand[1], best_hand[2]))
-            if comparison == 0:  # 平手
-                winners.append(player)
-            else:
-                break
+        # 按手牌强度排序（最强的在前面）
+        player_hands.sort(key=lambda x: (x[1].value, x[2]), reverse=True)
         
-        # 平分奖池
-        pot_share = game.pot // len(winners)
-        remainder = game.pot % len(winners)
+        logger.info(f"开始分配奖池，共 {len(side_pots)} 个奖池")
         
-        for i, winner in enumerate(winners):
-            share = pot_share + (1 if i < remainder else 0)
-            winner.add_chips(share)
-            winner.hands_won += 1
+        # 分配每个边池
+        for i, pot_info in enumerate(side_pots):
+            pot_amount = pot_info['amount']
+            eligible_players = pot_info['players']
             
-            # 更新统计数据
-            self.storage.update_player_stats(
-                winner.user_id,
-                winner.nickname,
-                chips_change=share,
-                hands_won=1
-            )
+            logger.debug(f"边池 {i+1}: {pot_amount}筹码，参与玩家: {[p.nickname for p in eligible_players]}")
+            
+            # 找出在这个边池中手牌最强的玩家
+            eligible_hands = [(p, r, v) for p, r, v in player_hands if p in eligible_players]
+            
+            if not eligible_hands:
+                continue
+                
+            # 找出最强手牌和并列获胜者
+            best_rank = eligible_hands[0][1]
+            best_values = eligible_hands[0][2]
+            winners = []
+            
+            for player, rank, values in eligible_hands:
+                comparison = HandEvaluator.compare_hands((rank, values), (best_rank, best_values))
+                if comparison == 0:  # 平手
+                    winners.append(player)
+                elif comparison > 0:  # 更强的手牌
+                    winners = [player]
+                    best_rank = rank
+                    best_values = values
+            
+            # 分配这个边池
+            if winners:
+                pot_share = pot_amount // len(winners)
+                remainder = pot_amount % len(winners)
+                
+                for j, winner in enumerate(winners):
+                    share = pot_share + (1 if j < remainder else 0)
+                    winner.add_chips(share)
+                    winner.hands_won += 1
+                    
+                    logger.info(f"玩家 {winner.nickname} 从边池 {i+1} 获得 {share} 筹码")
+                    
+                    # 更新统计数据
+                    self.storage.update_player_stats(
+                        winner.user_id,
+                        winner.nickname,
+                        chips_change=share,
+                        hands_won=1
+                    )
+    
+    def _create_side_pots(self, game: TexasHoldemGame) -> List[Dict[str, Any]]:
+        """创建边池系统 - 简化的基于当前下注的处理"""
+        # 获取所有参与摊牌的玩家（未弃牌的玩家）
+        active_players = [p for p in game.players if not p.is_folded]
+        
+        if len(active_players) <= 1:
+            return [{'amount': game.pot, 'players': active_players}]
+        
+        # 检查是否有全下玩家
+        all_in_players = [p for p in active_players if p.is_all_in]
+        
+        if not all_in_players:
+            # 没有全下玩家，只有一个主池
+            return [{'amount': game.pot, 'players': active_players}]
+        
+        # 简化处理：创建基于当前下注的边池系统
+        logger.info(f"检测到 {len(all_in_players)} 位全下玩家，创建边池系统")
+        
+        # 获取所有不同的下注水平
+        bet_levels = set()
+        for player in active_players:
+            bet_levels.add(player.current_bet)
+        
+        bet_levels = sorted(bet_levels)
+        logger.debug(f"下注水平: {bet_levels}")
+        
+        side_pots = []
+        previous_level = 0
+        
+        for level in bet_levels:
+            if level <= 0:
+                continue
+                
+            # 计算这个水平的投入差异
+            level_contribution = level - previous_level
+            
+            # 找出能参与这个水平的玩家（下注至少达到这个水平）
+            eligible_players = [p for p in active_players if p.current_bet >= level]
+            
+            if eligible_players and level_contribution > 0:
+                pot_amount = level_contribution * len(eligible_players)
+                
+                side_pots.append({
+                    'amount': pot_amount,
+                    'players': eligible_players.copy()
+                })
+                
+                logger.debug(f"边池水平 {level}: {pot_amount} 筹码, 玩家: {[p.nickname for p in eligible_players]}")
+            
+            previous_level = level
+        
+        # 验证总金额是否匹配
+        total_side_pot = sum(pot['amount'] for pot in side_pots)
+        if total_side_pot != game.pot:
+            logger.warning(f"边池总额 {total_side_pot} 与游戏底池 {game.pot} 不匹配，调整最后一个边池")
+            if side_pots:
+                adjustment = game.pot - total_side_pot
+                side_pots[-1]['amount'] += adjustment
+        
+        # 如果没有创建任何边池，创建一个默认的
+        if not side_pots:
+            side_pots = [{'amount': game.pot, 'players': active_players}]
+        
+        # 记录最终的边池信息
+        for i, pot in enumerate(side_pots):
+            logger.info(f"最终边池 {i+1}: {pot['amount']} 筹码, 参与玩家: {[p.nickname for p in pot['players']]}")
+        
+        return side_pots
     
     async def _end_game(self, game: TexasHoldemGame) -> None:
         """
