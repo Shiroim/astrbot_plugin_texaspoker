@@ -20,7 +20,10 @@ from astrbot.api import logger
 # 导入业务模块
 from .services.game_engine import GameEngine
 from .services.renderer import PokerRenderer
-from .utils.data_storage import DataStorage
+from .services.player_service import PlayerService
+from .utils.storage_manager import StorageManager
+from .utils.error_handler import ErrorHandler, GameValidation, ResponseMessages
+from .utils.money_formatter import MoneyFormatter, fmt_chips
 
 
 @register("astrbot_plugin_texaspoker", "YourName", "德州扑克群内多人对战插件", "1.0.0")
@@ -43,8 +46,9 @@ class TexasPokerPlugin(Star):
         self.config = context.get_config()
         
         # 初始化服务层
-        self.storage = DataStorage("texaspoker", context)
-        self.game_engine = GameEngine(self.storage)
+        self.storage = StorageManager("texaspoker", context)
+        self.player_service = PlayerService(self.storage)
+        self.game_engine = GameEngine(self.storage, self.player_service)
         self.renderer = PokerRenderer()
         
         # 临时文件跟踪
@@ -84,147 +88,149 @@ class TexasPokerPlugin(Star):
     
     # ==================== 游戏管理命令 ====================
     
+    @command("德州注册")
+    @ErrorHandler.game_command_error_handler("玩家注册")
+    async def register_player(self, event: AstrMessageEvent):
+        """注册德州扑克玩家"""
+        user_id = event.get_sender_id()
+        nickname = event.get_sender_name()
+        
+        # 检查是否已经注册
+        existing_player = self.player_service.get_player_info(user_id)
+        if existing_player:
+            total_chips = existing_player.get('total_chips', 0)
+            yield event.plain_result(f"{nickname}，您已经注册过了！\n当前银行余额: {fmt_chips(total_chips)}")
+            return
+        
+        # 获取初始筹码配置 (以K为单位)
+        initial_chips = self.storage.get_plugin_config_value('default_chips', 500)  # 500K
+        
+        # 注册新玩家
+        success, message = self.player_service.register_player(user_id, nickname, initial_chips)
+        
+        if success:
+            yield event.plain_result(f"🎉 {nickname} 注册成功！\n💰 获得初始资金: {fmt_chips(initial_chips)}")
+        else:
+            yield event.plain_result(message)
+    
     @command("德州创建")
-    async def create_game(self, event: AstrMessageEvent):
+    @ErrorHandler.game_command_error_handler("游戏创建")
+    async def create_game(self, event: AstrMessageEvent, small_blind: int = None, big_blind: int = None):
         """创建德州扑克游戏"""
-        try:
-            user_id = event.get_sender_id()
-            nickname = event.get_sender_name()
-            group_id = event.get_group_id() or user_id  # 私聊时使用用户ID作为group_id
+        user_id = event.get_sender_id()
+        nickname = event.get_sender_name()
+        group_id = event.get_group_id() or user_id  # 私聊时使用用户ID作为group_id
+        
+        # 参数验证
+        GameValidation.validate_game_creation_params(small_blind, big_blind)
+        
+        # 创建游戏
+        success, message, game = self.game_engine.create_game(
+            group_id, user_id, nickname, small_blind, big_blind
+        )
+        
+        if success and game:
+            # 获取默认买入金额用于显示
+            default_buyin = self.storage.get_plugin_config_value('default_buyin', 50)
             
-            # 解析盲注参数
-            params = event.get_param()
-            small_blind = None
-            big_blind = None
+            result_msg = (f"{message}\n"
+                         f"小盲注: {fmt_chips(game.small_blind)}, 大盲注: {fmt_chips(game.big_blind)}\n"
+                         f"默认买入: {fmt_chips(default_buyin)}\n"
+                         f"使用 /德州加入 [买入金额] 来加入游戏")
+            yield event.plain_result(result_msg)
             
-            if params:
-                parts = params.strip().split()
-                if len(parts) >= 1:
-                    try:
-                        small_blind = int(parts[0])
-                        if small_blind <= 0:
-                            yield event.plain_result("小盲注必须大于0")
-                            return
-                    except ValueError:
-                        yield event.plain_result("小盲注格式错误，请输入正整数")
-                        return
-                if len(parts) >= 2:
-                    try:
-                        big_blind = int(parts[1])
-                        if big_blind <= 0:
-                            yield event.plain_result("大盲注必须大于0")
-                            return
-                        if small_blind and big_blind <= small_blind:
-                            yield event.plain_result("大盲注必须大于小盲注")
-                            return
-                    except ValueError:
-                        yield event.plain_result("大盲注格式错误，请输入正整数")
-                        return
-            
-            # 创建游戏
-            success, message, game = self.game_engine.create_game(
-                group_id, user_id, nickname, small_blind, big_blind
-            )
-            
-            if success and game:
-                result_msg = f"{message}\n小盲注: {game.small_blind}\n大盲注: {game.big_blind}\n使用 /德州加入 来加入游戏"
-                yield event.plain_result(result_msg)
-                
-                # 初始化该群组的临时文件列表
-                if group_id not in self.temp_files:
-                    self.temp_files[group_id] = []
-            else:
-                yield event.plain_result(message)
-                
-        except ValueError as e:
-            yield event.plain_result(f"参数错误: {str(e)}")
-        except Exception as e:
-            logger.error(f"创建游戏失败: {e}")
-            yield event.plain_result("系统错误，请稍后重试")
+            # 初始化该群组的临时文件列表
+            if group_id not in self.temp_files:
+                self.temp_files[group_id] = []
+        else:
+            yield event.plain_result(message)
     
     @command("德州加入")
-    async def join_game(self, event: AstrMessageEvent):
+    @ErrorHandler.game_command_error_handler("加入游戏")
+    async def join_game(self, event: AstrMessageEvent, buyin: int = None):
         """加入德州扑克游戏"""
-        try:
-            user_id = event.get_sender_id()
-            nickname = event.get_sender_name()
-            group_id = event.get_group_id() or user_id
-            
-            success, message = self.game_engine.join_game(group_id, user_id, nickname)
-            yield event.plain_result(message)
-            
-        except Exception as e:
-            logger.error(f"加入游戏失败: {e}")
-            yield event.plain_result("系统错误，请稍后重试")
+        user_id = event.get_sender_id()
+        nickname = event.get_sender_name()
+        group_id = event.get_group_id() or user_id
+        
+        # 如果没有指定买入金额，使用默认值
+        if buyin is None:
+            buyin = self.storage.get_plugin_config_value('default_buyin', 50)  # 50K
+        
+        # 验证买入金额范围
+        min_buyin = self.storage.get_plugin_config_value('min_buyin', 10)  # 10K
+        max_buyin = self.storage.get_plugin_config_value('max_buyin', 200)  # 200K
+        
+        if buyin < min_buyin:
+            yield event.plain_result(f"买入金额过少，最少需要 {fmt_chips(min_buyin)}")
+            return
+        if buyin > max_buyin:
+            yield event.plain_result(f"买入金额过多，最多允许 {fmt_chips(max_buyin)}")
+            return
+        
+        # 使用买入制度加入游戏
+        success, message = self.game_engine.join_game_with_buyin(group_id, user_id, nickname, buyin)
+        yield event.plain_result(message)
     
     @command("德州开始")
+    @ErrorHandler.game_command_error_handler("开始游戏")
     async def start_game(self, event: AstrMessageEvent):
         """开始德州扑克游戏"""
-        try:
-            user_id = event.get_sender_id()
-            group_id = event.get_group_id() or user_id
+        user_id = event.get_sender_id()
+        group_id = event.get_group_id() or user_id
+        
+        success, message = self.game_engine.start_game(group_id, user_id)
+        
+        if success:
+            yield event.plain_result(message)
             
-            success, message = self.game_engine.start_game(group_id, user_id)
+            # 发送手牌给每个玩家（私聊）
+            await self._send_hand_cards_to_players(group_id)
             
-            if success:
-                yield event.plain_result(message)
-                
-                # 发送手牌给每个玩家（私聊）
-                await self._send_hand_cards_to_players(group_id)
-                
-                # 发送公共牌区域（群内）
-                community_result = await self._send_community_cards(group_id)
-                if community_result:
-                    yield community_result
-                
-            else:
-                yield event.plain_result(message)
-                
-        except Exception as e:
-            logger.error(f"开始游戏失败: {e}")
-            yield event.plain_result("系统错误，请稍后重试")
+            # 发送公共牌区域（群内）
+            community_result = await self._send_community_cards(group_id)
+            if community_result:
+                yield community_result
+        else:
+            yield event.plain_result(message)
     
     @command("德州状态")
+    @ErrorHandler.game_command_error_handler("查看游戏状态")
     async def show_game_status(self, event: AstrMessageEvent):
         """显示游戏状态"""
-        try:
-            group_id = event.get_group_id() or event.get_sender_id()
-            game = self.game_engine.get_game_state(group_id)
-            
-            if not game:
-                yield event.plain_result("当前没有进行中的游戏")
-                return
-            
-            # 构建状态信息
-            status_lines = [
-                f"🎮 游戏ID: {game.game_id}",
-                f"🎯 阶段: {game.phase.value.upper()}",
-                f"💰 底池: {game.pot}",
-                f"👥 玩家数: {len(game.players)}",
-                "",
-                "玩家列表:"
-            ]
-            
-            for i, player in enumerate(game.players):
-                status_line = f"{i+1}. {player.nickname} - 筹码:{player.chips}"
-                if player.current_bet > 0:
-                    status_line += f" (已下注:{player.current_bet})"
-                if player.is_folded:
-                    status_line += " (已弃牌)"
-                elif player.is_all_in:
-                    status_line += " (全下)"
-                status_lines.append(status_line)
-            
-            if game.phase in ["pre_flop", "flop", "turn", "river"]:
-                active_player = game.get_active_player()
-                if active_player:
-                    status_lines.append(f"\n⏰ 当前行动玩家: {active_player.nickname}")
-            
-            yield event.plain_result("\n".join(status_lines))
-            
-        except Exception as e:
-            logger.error(f"显示游戏状态失败: {e}")
-            yield event.plain_result("系统错误，请稍后重试")
+        group_id = event.get_group_id() or event.get_sender_id()
+        game = self.game_engine.get_game_state(group_id)
+        
+        if not game:
+            yield event.plain_result("当前没有进行中的游戏")
+            return
+        
+        # 构建状态信息
+        status_lines = [
+            f"🎮 游戏ID: {game.game_id}",
+            f"🎯 阶段: {game.phase.value.upper()}",
+            f"💰 底池: {fmt_chips(game.pot)}",
+            f"👥 玩家数: {len(game.players)}",
+            "",
+            "玩家列表:"
+        ]
+        
+        for i, player in enumerate(game.players):
+            status_line = f"{i+1}. {player.nickname} - 筹码: {fmt_chips(player.chips)}"
+            if player.current_bet > 0:
+                status_line += f" (已下注: {fmt_chips(player.current_bet)})"
+            if player.is_folded:
+                status_line += " (已弃牌)"
+            elif player.is_all_in:
+                status_line += " (全下)"
+            status_lines.append(status_line)
+        
+        if game.phase in ["pre_flop", "flop", "turn", "river"]:
+            active_player = game.get_active_player()
+            if active_player:
+                status_lines.append(f"\n⏰ 当前行动玩家: {active_player.nickname}")
+        
+        yield event.plain_result("\n".join(status_lines))
     
     # ==================== 游戏操作命令 ====================
     
@@ -235,21 +241,12 @@ class TexasPokerPlugin(Star):
             yield result
     
     @command("加注")
-    async def raise_action(self, event: AstrMessageEvent):
+    @ErrorHandler.game_command_error_handler("加注")
+    async def raise_action(self, event: AstrMessageEvent, amount: int = None):
         """加注"""
-        params = event.get_param()
-        amount = 0
-        
-        if params:
-            try:
-                amount = int(params.strip())
-            except ValueError:
-                yield event.plain_result("请输入正确的加注金额，例如：/加注 100")
-                return
-        
-        if amount <= 0:
-            yield event.plain_result("请输入加注金额，例如：/加注 100")
-            return
+        # 获取最小下注金额配置
+        min_bet = self.storage.get_plugin_config_value('min_bet', 1)  # 1K
+        GameValidation.validate_raise_amount(amount, min_bet)
         
         async for result in self._handle_player_action(event, "raise", amount):
             yield result
@@ -335,17 +332,33 @@ class TexasPokerPlugin(Star):
     @command("德州帮助")
     async def show_help(self, event: AstrMessageEvent):
         """显示帮助信息"""
-        help_text = """🃏 德州扑克插件帮助
+        # 获取配置信息用于帮助显示
+        default_chips = self.storage.get_plugin_config_value('default_chips', 500)
+        default_buyin = self.storage.get_plugin_config_value('default_buyin', 50)
+        min_buyin = self.storage.get_plugin_config_value('min_buyin', 10)
+        max_buyin = self.storage.get_plugin_config_value('max_buyin', 200)
+        default_small_blind = self.storage.get_plugin_config_value('small_blind', 1)
+        default_big_blind = self.storage.get_plugin_config_value('big_blind', 2)
+        
+        help_text = f"""🃏 德州扑克插件帮助
+
+💰 资金系统：
+- 注册获得 {fmt_chips(default_chips)} 银行资金
+- 买入制度：每局需买入筹码参与游戏
+- 游戏结束后剩余筹码自动返回银行
+
+玩家管理：
+/德州注册 - 注册玩家账户
 
 游戏管理：
-/德州创建 [小盲注] [大盲注] - 创建游戏
-/德州加入 - 加入游戏
+/德州创建 [{default_small_blind}] [{default_big_blind}] - 创建游戏 (盲注以K为单位)
+/德州加入 [{default_buyin}] - 加入游戏 (买入金额 {fmt_chips(min_buyin)}-{fmt_chips(max_buyin)})
 /德州开始 - 开始游戏
 /德州状态 - 查看游戏状态
 
 游戏操作：
 /跟注 - 跟注
-/加注 [金额] - 加注指定金额
+/加注 [金额] - 加注指定金额 (最小 1K)
 /弃牌 - 弃牌
 /让牌 - 让牌(check)
 /全下 - 全下所有筹码
@@ -358,7 +371,8 @@ class TexasPokerPlugin(Star):
 - 每人发2张手牌，5张公共牌
 - 翻牌前、翻牌、转牌、河牌四轮下注
 - 最终比较牌型大小决定胜负
-- 支持超时自动弃牌机制"""
+- 支持超时自动弃牌机制
+- 所有金额以K为单位 (1K = 1000)"""
         
         yield event.plain_result(help_text)
     

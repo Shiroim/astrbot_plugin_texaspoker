@@ -1,1 +1,1 @@
-"""工具模块包"""
+# Utils package for Texas Poker plugin

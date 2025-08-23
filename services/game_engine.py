@@ -19,8 +19,9 @@ from astrbot.api import logger
 class GameEngine:
     """德州扑克游戏引擎"""
     
-    def __init__(self, storage: DataStorage):
+    def __init__(self, storage: DataStorage, player_service=None):
         self.storage = storage
+        self.player_service = player_service
         self.active_games: Dict[str, TexasHoldemGame] = {}
         self.timeouts: Dict[str, asyncio.Task] = {}
     
@@ -72,12 +73,36 @@ class GameEngine:
                 timeout_seconds=timeout_seconds
             )
             
-            # 创建创建者玩家
-            creator = Player(
-                user_id=creator_id,
-                nickname=creator_nickname,
-                chips=default_chips
-            )
+            # 获取默认买入金额
+            default_buyin = self.storage.get_plugin_config_value('default_buyin', 50)  # 50K
+            
+            # 创建者需要买入才能创建游戏
+            if self.player_service:
+                # 检查创建者是否已注册并有足够资金
+                can_buyin, buyin_msg = self.player_service.can_buyin(creator_id, default_buyin)
+                if not can_buyin:
+                    return False, f"创建游戏失败: {buyin_msg}", None
+                
+                # 执行买入
+                buyin_success, buyin_msg, remaining_bank = self.player_service.process_buyin(
+                    creator_id, creator_nickname, default_buyin
+                )
+                if not buyin_success:
+                    return False, f"创建游戏失败: {buyin_msg}", None
+                
+                # 创建游戏内玩家对象
+                creator = Player(
+                    user_id=creator_id,
+                    nickname=creator_nickname,
+                    chips=default_buyin  # 买入金额作为游戏内筹码
+                )
+            else:
+                # 后备方案：直接创建Player对象
+                creator = Player(
+                    user_id=creator_id,
+                    nickname=creator_nickname,
+                    chips=default_buyin
+                )
             
             if not game.add_player(creator):
                 return False, "添加创建者失败", None
@@ -125,13 +150,36 @@ class GameEngine:
             if len(game.players) >= max_players:
                 return False, f"游戏人数已满({max_players}人)"
             
-            # 创建新玩家
-            default_chips = self.storage.get_plugin_config_value('default_chips', 1000)
-            player = Player(
-                user_id=user_id,
-                nickname=nickname,
-                chips=default_chips
-            )
+            # 获取默认买入金额
+            default_buyin = self.storage.get_plugin_config_value('default_buyin', 50)  # 50K
+            
+            # 玩家需要买入才能加入游戏
+            if self.player_service:
+                # 检查玩家是否已注册并有足够资金
+                can_buyin, buyin_msg = self.player_service.can_buyin(user_id, default_buyin)
+                if not can_buyin:
+                    return False, f"加入游戏失败: {buyin_msg}"
+                
+                # 执行买入
+                buyin_success, buyin_msg, remaining_bank = self.player_service.process_buyin(
+                    user_id, nickname, default_buyin
+                )
+                if not buyin_success:
+                    return False, f"加入游戏失败: {buyin_msg}"
+                
+                # 创建游戏内玩家对象
+                player = Player(
+                    user_id=user_id,
+                    nickname=nickname,
+                    chips=default_buyin  # 买入金额作为游戏内筹码
+                )
+            else:
+                # 后备方案：直接创建Player对象
+                player = Player(
+                    user_id=user_id,
+                    nickname=nickname,
+                    chips=default_buyin
+                )
             
             # 添加玩家到游戏
             if game.add_player(player):
@@ -145,6 +193,94 @@ class GameEngine:
         except Exception as e:
             logger.error(f"玩家加入游戏时发生错误: {e}")
             return False, "加入游戏失败，请稍后重试"
+    
+    def join_game_with_buyin(self, group_id: str, user_id: str, nickname: str, buyin_amount: int) -> Tuple[bool, str]:
+        """
+        玩家以指定买入金额加入游戏
+        
+        Args:
+            group_id: 群组ID
+            user_id: 用户ID
+            nickname: 用户昵称
+            buyin_amount: 买入金额 (K为单位)
+            
+        Returns:
+            Tuple[成功标志, 消息]
+        """
+        try:
+            if group_id not in self.active_games:
+                return False, "该群没有正在进行的游戏"
+            
+            game = self.active_games[group_id]
+            
+            # 检查游戏状态
+            if game.phase != GamePhase.WAITING:
+                return False, "游戏已开始，无法加入"
+            
+            # 检查玩家是否已在游戏中
+            if game.get_player(user_id):
+                return False, "您已在游戏中"
+            
+            # 检查人数限制
+            max_players = self.storage.get_plugin_config_value('max_players', 9)
+            if len(game.players) >= max_players:
+                return False, f"游戏人数已满({max_players}人)"
+            
+            # 验证买入金额范围
+            min_buyin = self.storage.get_plugin_config_value('min_buyin', 10)  # 10K
+            max_buyin = self.storage.get_plugin_config_value('max_buyin', 200)  # 200K
+            
+            if buyin_amount < min_buyin:
+                return False, f"买入金额过少，最少需要 {min_buyin}K"
+            if buyin_amount > max_buyin:
+                return False, f"买入金额过多，最多允许 {max_buyin}K"
+            
+            # 玩家买入
+            if self.player_service:
+                # 检查玩家是否已注册并有足够资金
+                can_buyin, buyin_msg = self.player_service.can_buyin(user_id, buyin_amount)
+                if not can_buyin:
+                    return False, f"买入失败: {buyin_msg}"
+                
+                # 执行买入
+                buyin_success, buyin_msg, remaining_bank = self.player_service.process_buyin(
+                    user_id, nickname, buyin_amount
+                )
+                if not buyin_success:
+                    return False, f"买入失败: {buyin_msg}"
+                
+                # 创建游戏内玩家对象
+                player = Player(
+                    user_id=user_id,
+                    nickname=nickname,
+                    chips=buyin_amount  # 买入金额作为游戏内筹码
+                )
+                
+                success_message = f"{nickname} 买入 {buyin_amount}K 成功加入游戏！银行剩余: {remaining_bank}K"
+            else:
+                # 后备方案：直接创建Player对象
+                player = Player(
+                    user_id=user_id,
+                    nickname=nickname,
+                    chips=buyin_amount
+                )
+                success_message = f"{nickname} 买入 {buyin_amount}K 成功加入游戏！"
+            
+            # 添加玩家到游戏
+            if game.add_player(player):
+                # 保存游戏状态
+                self.storage.save_game(group_id, game.to_dict())
+                logger.info(f"玩家 {nickname} 买入 {buyin_amount}K 加入游戏 {game.game_id}")
+                return True, f"{success_message} 当前玩家数: {len(game.players)}"
+            else:
+                # 如果添加失败，需要退还买入金额
+                if self.player_service:
+                    self.player_service.process_cashout(user_id, nickname, buyin_amount)
+                return False, "添加玩家失败"
+                
+        except Exception as e:
+            logger.error(f"玩家买入加入游戏时发生错误: {e}")
+            return False, "买入加入游戏失败，请稍后重试"
     
     def start_game(self, group_id: str, user_id: str) -> Tuple[bool, str]:
         """
@@ -618,16 +754,28 @@ class GameEngine:
         try:
             game.phase = GamePhase.FINISHED
             
-            # 更新所有玩家的统计数据
+            # 处理所有玩家的游戏结束兑现
             for player in game.players:
                 try:
+                    # 更新统计数据
                     self.storage.update_player_stats(
                         player.user_id,
                         player.nickname,
                         games_played=1
                     )
+                    
+                    # 兑现玩家剩余筹码回银行
+                    if player.chips > 0 and self.player_service:
+                        cashout_success, cashout_msg = self.player_service.process_cashout(
+                            player.user_id, player.nickname, player.chips
+                        )
+                        if cashout_success:
+                            logger.info(f"玩家 {player.nickname} 兑现 {player.chips}K 回银行")
+                        else:
+                            logger.warning(f"玩家 {player.nickname} 兑现失败: {cashout_msg}")
+                            
                 except Exception as e:
-                    logger.warning(f"更新玩家 {player.nickname} 统计数据失败: {e}")
+                    logger.warning(f"处理玩家 {player.nickname} 游戏结束数据失败: {e}")
             
             # 保存游戏历史
             self._save_game_history(game)
