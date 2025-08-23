@@ -27,10 +27,25 @@ class ErrorHandler:
                         yield result
                 except ValueError as e:
                     logger.warning(f"{operation_name}参数错误: {e}")
-                    yield event.plain_result(f"参数错误: {str(e)}")
+                    error_msg = [
+                        f"❌ {operation_name}失败",
+                        "",
+                        f"🔍 错误原因: 参数错误",
+                        f"📝 详细信息: {str(e)}",
+                        "",
+                        "💡 请检查输入参数并重试"
+                    ]
+                    yield event.plain_result("\n".join(error_msg))
                 except Exception as e:
                     logger.error(f"{operation_name}失败: {e}")
-                    yield event.plain_result("系统错误，请稍后重试")
+                    error_msg = [
+                        f"❌ {operation_name}失败",
+                        "",
+                        "🔍 错误原因: 系统异常",
+                        "",
+                        "💡 请稍后重试，如问题持续请联系管理员"
+                    ]
+                    yield event.plain_result("\n".join(error_msg))
             return wrapper
         return decorator
     

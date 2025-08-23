@@ -77,6 +77,7 @@ class Player:
     total_winnings: int = 0           # 总盈利
     games_played: int = 0             # 游戏局数
     hands_won: int = 0                # 获胜手数
+    initial_chips: int = 0            # 本局游戏初始筹码（用于计算盈亏）
     
     def __post_init__(self):
         """初始化后处理"""
@@ -157,7 +158,8 @@ class Player:
             'last_action': self.last_action.value if self.last_action else None,
             'total_winnings': self.total_winnings,
             'games_played': self.games_played,
-            'hands_won': self.hands_won
+            'hands_won': self.hands_won,
+            'initial_chips': self.initial_chips
         }
     
     @classmethod
@@ -173,7 +175,8 @@ class Player:
             position=data.get('position', 0),
             total_winnings=data.get('total_winnings', 0),
             games_played=data.get('games_played', 0),
-            hands_won=data.get('hands_won', 0)
+            hands_won=data.get('hands_won', 0),
+            initial_chips=data.get('initial_chips', 0)
         )
         
         if data.get('last_action'):

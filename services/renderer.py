@@ -70,27 +70,33 @@ class PokerRenderer:
         return self.font_cache[font_key]
     
     def _create_card_image(self, card: Card, face_up: bool = True) -> Image.Image:
-        """创建单张扑克牌图像"""
-        # 创建卡片背景
-        card_img = Image.new('RGBA', (self.card_width, self.card_height), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(card_img)
-        
-        # 绘制卡片边框
-        border_color = (0, 0, 0, 255)
-        corner_radius = 12
-        
-        # 绘制圆角矩形
-        self._draw_rounded_rectangle(draw, [(0, 0), (self.card_width-1, self.card_height-1)], 
-                                   corner_radius, fill=(255, 255, 255, 255), outline=border_color, width=2)
-        
-        if not face_up:
-            # 绘制牌背
-            self._draw_card_back(draw)
-        else:
-            # 绘制牌面
-            self._draw_card_face(draw, card)
-        
-        return card_img
+        """创建单张扑克牌图像 - 使用预制素材"""
+        try:
+            if not face_up:
+                # 加载牌背图片
+                card_path = os.path.join(self.assets_dir, "cards", "back.png")
+            else:
+                # 根据牌面和花色加载对应图片
+                rank_str = self._get_rank_filename(card.rank)
+                suit_str = self._get_suit_filename(card.suit)
+                filename = f"{rank_str}_{suit_str}.png"
+                card_path = os.path.join(self.assets_dir, "cards", filename)
+            
+            if os.path.exists(card_path):
+                # 加载并调整图片尺寸
+                card_img = Image.open(card_path).convert('RGBA')
+                if card_img.size != (self.card_width, self.card_height):
+                    card_img = card_img.resize((self.card_width, self.card_height), Image.Resampling.LANCZOS)
+                return card_img
+            else:
+                logger.warning(f"扑克牌素材文件不存在: {card_path}")
+                # 回退到绘制模式
+                return self._draw_card_fallback(card, face_up)
+                
+        except Exception as e:
+            logger.error(f"加载扑克牌素材失败: {e}")
+            # 回退到绘制模式
+            return self._draw_card_fallback(card, face_up)
     
     def _draw_rounded_rectangle(self, draw: ImageDraw.Draw, bbox: List[Tuple[int, int]], 
                               radius: int, fill=None, outline=None, width=1):
@@ -182,6 +188,26 @@ class PokerRenderer:
             Rank.TWO: "2"
         }
         return rank_map[rank]
+    
+    def _get_rank_filename(self, rank: Rank) -> str:
+        """获取牌值文件名"""
+        rank_map = {
+            Rank.ACE: "a", Rank.KING: "k", Rank.QUEEN: "q", Rank.JACK: "j",
+            Rank.TEN: "10", Rank.NINE: "9", Rank.EIGHT: "8", Rank.SEVEN: "7",
+            Rank.SIX: "6", Rank.FIVE: "5", Rank.FOUR: "4", Rank.THREE: "3", 
+            Rank.TWO: "2"
+        }
+        return rank_map[rank]
+    
+    def _get_suit_filename(self, suit: Suit) -> str:
+        """获取花色文件名"""
+        suit_map = {
+            Suit.SPADES: "spades",
+            Suit.HEARTS: "hearts", 
+            Suit.DIAMONDS: "diamonds",
+            Suit.CLUBS: "clubs"
+        }
+        return suit_map[suit]
     
     def render_hand_cards(self, player: Player, game: TexasHoldemGame) -> Image.Image:
         """渲染玩家手牌图片"""
@@ -461,3 +487,26 @@ class PokerRenderer:
         except Exception as e:
             logger.warning(f"统计临时文件时出错: {e}")
             return 0
+    
+    def _draw_card_fallback(self, card: Card, face_up: bool = True) -> Image.Image:
+        """当素材文件不存在时的回退绘制方法"""
+        # 创建卡片背景
+        card_img = Image.new('RGBA', (self.card_width, self.card_height), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(card_img)
+        
+        # 绘制卡片边框
+        border_color = (0, 0, 0, 255)
+        corner_radius = 12
+        
+        # 绘制圆角矩形
+        self._draw_rounded_rectangle(draw, [(0, 0), (self.card_width-1, self.card_height-1)], 
+                                   corner_radius, fill=(255, 255, 255, 255), outline=border_color, width=2)
+        
+        if not face_up:
+            # 绘制牌背
+            self._draw_card_back(draw)
+        else:
+            # 绘制牌面
+            self._draw_card_face(draw, card)
+        
+        return card_img

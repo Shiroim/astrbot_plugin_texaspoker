@@ -94,14 +94,16 @@ class GameEngine:
                 creator = Player(
                     user_id=creator_id,
                     nickname=creator_nickname,
-                    chips=default_buyin  # 买入金额作为游戏内筹码
+                    chips=default_buyin,  # 买入金额作为游戏内筹码
+                    initial_chips=default_buyin  # 记录初始筹码
                 )
             else:
                 # 后备方案：直接创建Player对象
                 creator = Player(
                     user_id=creator_id,
                     nickname=creator_nickname,
-                    chips=default_buyin
+                    chips=default_buyin,
+                    initial_chips=default_buyin
                 )
             
             if not game.add_player(creator):
@@ -171,14 +173,16 @@ class GameEngine:
                 player = Player(
                     user_id=user_id,
                     nickname=nickname,
-                    chips=default_buyin  # 买入金额作为游戏内筹码
+                    chips=default_buyin,  # 买入金额作为游戏内筹码
+                    initial_chips=default_buyin  # 记录初始筹码用于计算盈亏
                 )
             else:
                 # 后备方案：直接创建Player对象
                 player = Player(
                     user_id=user_id,
                     nickname=nickname,
-                    chips=default_buyin
+                    chips=default_buyin,
+                    initial_chips=default_buyin
                 )
             
             # 添加玩家到游戏
@@ -253,7 +257,8 @@ class GameEngine:
                 player = Player(
                     user_id=user_id,
                     nickname=nickname,
-                    chips=buyin_amount  # 买入金额作为游戏内筹码
+                    chips=buyin_amount,  # 买入金额作为游戏内筹码
+                    initial_chips=buyin_amount  # 记录初始筹码
                 )
                 
                 success_message = f"{nickname} 买入 {buyin_amount}K 成功加入游戏！银行剩余: {remaining_bank}K"
@@ -262,7 +267,8 @@ class GameEngine:
                 player = Player(
                     user_id=user_id,
                     nickname=nickname,
-                    chips=buyin_amount
+                    chips=buyin_amount,
+                    initial_chips=buyin_amount
                 )
                 success_message = f"{nickname} 买入 {buyin_amount}K 成功加入游戏！"
             
