@@ -171,14 +171,28 @@ class Player:
                     f"行动 {old_state['last_action']}->None")
     
     def reset_for_new_betting_round(self) -> None:
-        """重置玩家状态以开始新的下注轮"""
+        """重置玩家状态以开始新的下注轮（增强版本）"""
+        # 保存重置前的状态用于验证
+        old_bet = self.current_bet
+        old_acted = self.has_acted_this_round
+        old_action = self.last_action
+        
+        # 重置下注相关状态
         self.current_bet = 0
         self.has_acted_this_round = False
         self.last_action = None
+        
+        # 验证重置是否成功（调试模式下）
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"玩家 {self.nickname} 下注轮状态重置: "
+                    f"下注 {old_bet}->0, "
+                    f"已行动 {old_acted}->False, "
+                    f"行动 {old_action}->None")
     
     def validate_state(self) -> bool:
         """
-        验证玩家状态的一致性
+        验证玩家状态的一致性（增强版本，针对德州扑克规则）
         
         Returns:
             True表示状态一致，False表示状态异常
@@ -194,19 +208,23 @@ class Player:
             if not isinstance(self.hole_cards, list):
                 return False
             
-            # 检查逻辑一致性
+            # 检查德州扑克特有的逻辑一致性
             if self.is_all_in and self.chips > 0:
                 # 全下的玩家不应该有剩余筹码
                 return False
             
-            if self.is_folded and self.current_bet > 0:
-                # 弃牌的玩家在新轮次开始时不应该有下注
-                # 注意：这里只检查新轮次，不检查同一轮次内的状态
-                pass
+            if self.is_folded and not self.is_all_in and self.chips <= 0:
+                # 弃牌且非全下的玩家不应该没有筹码
+                return False
             
-            # 检查手牌数量
+            # 检查手牌数量（德州扑克规则：每人2张手牌）
             if len(self.hole_cards) > 2:
                 return False
+            
+            # 检查行动状态的一致性
+            if self.is_folded and self.has_acted_this_round and not self.last_action:
+                # 已弃牌且已行动的玩家应该有最后行动记录
+                pass  # 这个检查可能过于严格，暂时跳过
             
             return True
             
@@ -273,6 +291,9 @@ class TexasHoldemGame:
     last_action_time: int = field(default_factory=lambda: int(time.time()))  # 最后行动时间
     timeout_seconds: int = 30              # 超时时间
     
+    # 内部状态追踪（不保存到存储）
+    _phase_just_changed: bool = field(default=False, init=False)  # 阶段是否刚刚改变
+    
     def __post_init__(self):
         """初始化后处理"""
         if not self.game_id:
@@ -336,7 +357,7 @@ class TexasHoldemGame:
         return int(time.time()) - self.last_action_time > self.timeout_seconds
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
+        """转换为字典（不包含内部状态字段）"""
         return {
             'game_id': self.game_id,
             'group_id': self.group_id,
@@ -353,6 +374,7 @@ class TexasHoldemGame:
             'created_at': self.created_at,
             'last_action_time': self.last_action_time,
             'timeout_seconds': self.timeout_seconds
+            # 注意：_phase_just_changed 是内部状态，不保存到存储
         }
     
     @classmethod

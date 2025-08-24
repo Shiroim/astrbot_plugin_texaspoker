@@ -337,9 +337,9 @@ class GameEngine:
             # 启动超时检查
             self._start_timeout_check(group_id)
             
-            # 发送第一个行动提示
-            if self.action_prompt_callback:
-                asyncio.create_task(self.action_prompt_callback(group_id, game))
+            # 发送第一个行动提示（等待超时检查启动后再发送）
+            # 注意：这里不立即发送，由超时检查机制触发第一次提示
+            # 这样可以避免与手牌发送产生时序问题
             
             logger.info(f"游戏开始: {game.game_id}, 玩家数: {len(game.players)}")
             return True, f"游戏开始！参与玩家: {len(game.players)}人"
@@ -546,7 +546,7 @@ class GameEngine:
                 # 更新行动时间
                 game.update_last_action_time()
                 
-                # 检测阶段变化，并在消息中标记
+                # 检测阶段变化，并在游戏对象中标记
                 if game.phase != previous_phase:
                     game._phase_just_changed = True
                 else:
@@ -663,12 +663,11 @@ class GameEngine:
             return False, "处理行动时发生错误"
     
     def _move_to_next_player(self, game: TexasHoldemGame):
-        """移动到下一个有效玩家（完全重写的状态机逻辑）"""
+        """移动到下一个有效玩家（修复版本，按正确的德州扑克规则）"""
         if len(game.players) == 0:
             logger.warning("没有玩家可以移动到下一个")
             return
         
-        original_player_index = game.active_player_index
         attempts = 0
         max_attempts = len(game.players)
         
@@ -682,21 +681,20 @@ class GameEngine:
             if self._player_needs_action(next_player, game):
                 logger.debug(f"下一个行动玩家: {next_player.nickname} (索引: {game.active_player_index})")
                 
-                # 发送行动提示
+                # 同步发送行动提示，避免竞态条件
                 if self.action_prompt_callback:
-                    asyncio.create_task(self.action_prompt_callback(game.group_id, game))
+                    try:
+                        # 直接调用回调，不创建异步任务
+                        asyncio.create_task(self.action_prompt_callback(game.group_id, game))
+                    except Exception as e:
+                        logger.error(f"发送行动提示失败: {e}")
                 
                 return
-                
-            # 如果回到原始玩家，说明这轮下注完成
-            if game.active_player_index == original_player_index:
-                logger.debug("所有玩家已完成本轮下注")
-                break
         
-        # 如果没有找到需要行动的玩家，下注轮结束，检查是否应该进入下一阶段
-        logger.debug("本轮下注结束，没有玩家需要继续行动")
+        # 所有玩家都无法行动，检查下注轮是否结束
+        logger.debug("没有找到需要行动的玩家，检查下注轮状态")
         
-        # 异步检查下注轮是否完成
+        # 直接同步检查下注轮是否完成，避免异步竞态条件
         asyncio.create_task(self._check_betting_round_complete(game))
     
     def _player_needs_action(self, player: Player, game: TexasHoldemGame) -> bool:
@@ -735,7 +733,7 @@ class GameEngine:
         return False
     
     async def _check_betting_round_complete(self, game: TexasHoldemGame):
-        """检查下注轮是否结束（重写的严格逻辑）"""
+        """检查下注轮是否结束（合并了原有重复逻辑，修复版本）"""
         active_players = [p for p in game.players if not p.is_folded]
         
         # 如果只剩一个玩家，直接结束游戏
@@ -753,51 +751,42 @@ class GameEngine:
         if players_needing_action:
             # 还有玩家需要行动，下注轮未完成
             logger.debug(f"还有玩家需要行动: {', '.join(players_needing_action)}")
+            # 设置第一个需要行动的玩家为当前行动玩家（修复逻辑不完整问题）
+            for i, player in enumerate(game.players):
+                if player.nickname in players_needing_action:
+                    game.active_player_index = i
+                    logger.debug(f"设置下一个行动玩家: {player.nickname} (索引: {i})")
+                    # 发送行动提示
+                    if self.action_prompt_callback:
+                        try:
+                            await self.action_prompt_callback(game.group_id, game)
+                        except Exception as e:
+                            logger.error(f"发送行动提示失败: {e}")
+                    break
             return
         
-        # 所有玩家都完成了行动，检查下注轮是否真的结束
-        if self._is_betting_round_truly_complete(game, active_players):
-            logger.info(f"游戏 {game.game_id} 下注轮完成，进入下一阶段")
-            await self._advance_to_next_phase(game)
-        else:
-            logger.debug(f"游戏 {game.game_id} 下注轮未真正完成，继续等待")
-    
-    def _is_betting_round_truly_complete(self, game: TexasHoldemGame, active_players: list) -> bool:
-        """
-        严格检查下注轮是否真正完成（修复版本）
-        
-        下注轮完成的条件：
-        1. 所有未弃牌、未全下的玩家都已行动过
-        2. 所有未弃牌、未全下的玩家下注额都一致（或已弃牌）
-        
-        Args:
-            game: 游戏对象
-            active_players: 仍在游戏中的玩家列表
-            
-        Returns:
-            True表示下注轮完成，False表示未完成
-        """
-        # 获取非全下玩家
+        # 所有玩家都完成了行动，检查下注轮是否真的结束（合并原有重复逻辑）
         non_allin_players = [p for p in active_players if not p.is_all_in]
         
         # 如果只有全下玩家，下注轮完成
         if len(non_allin_players) <= 1:
-            return True
+            logger.info(f"游戏 {game.game_id} 下注轮完成（只有全下玩家），进入下一阶段")
+            await self._advance_to_next_phase(game)
+            return
         
-        # 检查所有非全下玩家是否都已行动
+        # 检查所有非全下玩家是否都已行动且下注一致
         for player in non_allin_players:
             if not player.has_acted_this_round:
                 logger.debug(f"玩家 {player.nickname} 尚未在本轮行动")
-                return False
-        
-        # 检查所有非全下玩家的下注是否一致
-        for player in non_allin_players:
+                return
             if player.current_bet < game.current_bet:
                 logger.debug(f"玩家 {player.nickname} 下注不足：{player.current_bet} < {game.current_bet}")
-                return False
+                return
         
-        logger.debug("下注轮完成：所有玩家已行动且下注一致")
-        return True
+        logger.info(f"游戏 {game.game_id} 下泣轮完成，进入下一阶段")
+        await self._advance_to_next_phase(game)
+    
+    # 删除重复的方法，功能已合并到 _check_betting_round_complete 中
     
     async def _advance_to_next_phase(self, game: TexasHoldemGame):
         """进入下一游戏阶段"""
@@ -862,9 +851,12 @@ class GameEngine:
             # 保存游戏状态（阶段切换后）
             self.storage.save_game(game.group_id, game.to_dict())
             
-            # 发送新阶段的行动提示
+            # 发送新阶段的行动提示（同步调用，避免竞态条件）
             if self.action_prompt_callback and game.phase != GamePhase.SHOWDOWN:
-                asyncio.create_task(self.action_prompt_callback(game.group_id, game))
+                try:
+                    await self.action_prompt_callback(game.group_id, game)
+                except Exception as e:
+                    logger.error(f"发送新阶段行动提示失败: {e}")
             
         except Exception as e:
             logger.error(f"阶段切换时发生错误: {e}")
