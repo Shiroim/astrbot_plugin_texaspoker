@@ -15,7 +15,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
 # 导入重构后的模块
-from .controllers.game_controller import GameController
+from .services.game_manager import GameManager
 from .services.command_handler import CommandHandler
 from .services.player_service import PlayerService
 from .services.message_service import UniversalMessageService
@@ -47,11 +47,11 @@ class TexasPokerPlugin(Star):
         self.storage = StorageManager("texaspoker", context)
         self.player_service = PlayerService(self.storage)
         self.message_service = UniversalMessageService(context)
-        self.game_controller = GameController(self.storage, self.player_service)
+        self.game_manager = GameManager(self.storage, self.player_service)
         self.command_handler = CommandHandler(
             self.storage, 
             self.player_service, 
-            self.game_controller
+            self.game_manager
         )
         
         logger.info("德州扑克插件初始化完成")
@@ -62,11 +62,11 @@ class TexasPokerPlugin(Star):
             # 执行数据迁移（如果需要）
             await self._perform_data_migration()
             
-            # 初始化游戏控制器
-            await self.game_controller.initialize()
+            # 初始化游戏管理器
+            await self.game_manager.initialize()
             
             # 设置行动提示回调
-            self.game_controller.set_action_prompt_callback(self._send_action_prompt_message)
+            self.game_manager.set_action_prompt_callback(self._send_action_prompt_message)
             
             logger.info("德州扑克插件启动完成")
         except Exception as e:
@@ -76,8 +76,8 @@ class TexasPokerPlugin(Star):
     async def terminate(self):
         """插件销毁"""
         try:
-            # 安全关闭游戏控制器
-            await self.game_controller.terminate()
+            # 安全关闭游戏管理器
+            await self.game_manager.terminate()
             
             logger.info("德州扑克插件已安全停止")
         except Exception as e:
@@ -201,23 +201,13 @@ class TexasPokerPlugin(Star):
         """发送手牌给每个玩家（通过消息服务）"""
         try:
             group_id = event.get_group_id() or UserIsolation.get_isolated_user_id(event)
-            game = self.game_controller.get_game_state(group_id)
+            game = self.game_manager.get_game_state(group_id)
             
             if not game or len(game.players) == 0:
                 return
             
-            # 获取所有玩家的手牌图片
-            hand_images = {}
-            for player in game.players:
-                if len(player.hole_cards) >= 2:
-                    # 渲染手牌图片
-                    hand_img = self.game_controller.renderer.render_hand_cards(player, game)
-                    filename = f"hand_{player.user_id}_{game.game_id}.png"
-                    img_path = self.game_controller.renderer.save_image(hand_img, filename)
-                    if img_path:
-                        hand_images[player.user_id] = img_path
-                        # 添加到临时文件跟踪
-                        self.game_controller.temp_files.setdefault(group_id, []).append(img_path)
+            # 生成手牌图片
+            hand_images = self.game_manager.generate_hand_images(group_id)
             
             # 批量发送手牌
             players_info = [{'user_id': p.user_id, 'nickname': p.nickname} for p in game.players]
@@ -272,9 +262,6 @@ class TexasPokerPlugin(Star):
     async def _send_showdown_results(self, group_id: str, game) -> None:
         """发送摊牌结果"""
         try:
-            # 生成摊牌图片
-            result_data = self.game_controller.generate_action_result_images(group_id, game, "摊牌")
-            
             # 发送摊牌结果文本
             if hasattr(game, 'showdown_results'):
                 result_message = self._build_showdown_message(game)
@@ -282,9 +269,10 @@ class TexasPokerPlugin(Star):
                 if not success:
                     logger.warning(f"发送摊牌结果文本失败: {group_id}")
             
-            # 发送摊牌图片
-            if result_data and result_data.get('showdown_image'):
-                success = await self.message_service.send_group_image(group_id, result_data['showdown_image'])
+            # 生成并发送摊牌图片
+            showdown_image = self.game_manager.generate_showdown_image(group_id)
+            if showdown_image:
+                success = await self.message_service.send_group_image(group_id, showdown_image)
                 if not success:
                     logger.warning(f"发送摊牌图片失败: {group_id}")
                     
@@ -376,8 +364,8 @@ class TexasPokerPlugin(Star):
         """获取插件状态（用于监控和调试）"""
         try:
             return {
-                'active_games': len(self.game_controller.game_engine.active_games),
-                'temp_files': sum(len(files) for files in self.game_controller.temp_files.values()),
+                'active_games': len(self.game_manager.active_games),
+                'temp_files': sum(len(files) for files in self.game_manager.temp_files.values()),
                 'storage_stats': self.storage.get_storage_statistics(),
                 'memory_usage': await self._get_memory_usage()
             }

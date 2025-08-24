@@ -7,7 +7,7 @@ from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api.event.filter import command
 from astrbot.api import logger
 
-from ..controllers.game_controller import GameController
+from ..services.game_manager import GameManager
 from ..services.player_service import PlayerService
 from ..utils.storage_manager import StorageManager
 from ..utils.user_isolation import UserIsolation
@@ -28,10 +28,10 @@ class CommandHandler:
     """
     
     def __init__(self, storage: StorageManager, player_service: PlayerService, 
-                 game_controller: GameController):
+                 game_manager: GameManager):
         self.storage = storage
         self.player_service = player_service
-        self.game_controller = game_controller
+        self.game_manager = game_manager
         
         logger.info("命令处理器初始化完成")
     
@@ -75,7 +75,7 @@ class CommandHandler:
         group_id = event.get_group_id() or user_id
         
         # 创建游戏
-        success, message, game = await self.game_controller.create_game(
+        success, message, game = self.game_manager.create_game(
             group_id, user_id, nickname, small_blind, big_blind
         )
         
@@ -109,7 +109,7 @@ class CommandHandler:
         self._validate_buyin_range(buyin)
         
         # 使用买入制度加入游戏
-        success, message = await self.game_controller.join_game_with_buyin(
+        success, message = self.game_manager.join_game(
             group_id, user_id, nickname, buyin
         )
         
@@ -135,7 +135,7 @@ class CommandHandler:
         user_id = UserIsolation.get_isolated_user_id(event)
         group_id = event.get_group_id() or user_id
         
-        success, message, game_images = await self.game_controller.start_game(group_id, user_id)
+        success, message = await self.game_manager.start_game(group_id, user_id)
         
         if success:
             # 发送游戏开始信息
@@ -144,8 +144,9 @@ class CommandHandler:
                 yield event.plain_result(start_info)
             
             # 发送公共牌图片
-            if game_images and game_images.get('community_image'):
-                yield event.image_result(game_images['community_image'])
+            community_image = self.game_manager.generate_community_image(group_id)
+            if community_image:
+                yield event.image_result(community_image)
         else:
             error_msg = [
                 "❌ 游戏开始失败",
@@ -172,7 +173,7 @@ class CommandHandler:
         
         # 检查游戏是否已结束，如果是则清理
         if game.phase.value == "finished":
-            await self.game_controller.cleanup_finished_game(group_id)
+            await self.game_manager._cleanup_game_resources(group_id)
             finished_msg = self._build_game_finished_message()
             yield event.plain_result("\n".join(finished_msg))
             return
@@ -187,21 +188,29 @@ class CommandHandler:
         user_id = UserIsolation.get_isolated_user_id(event)
         group_id = event.get_group_id() or user_id
         
-        success, message, result_data = await self.game_controller.handle_player_action(
+        success, message = await self.game_manager.player_action(
             group_id, user_id, action, amount
         )
         
         if success:
             # 构建行动结果消息
-            result_msg = self._build_action_result_message(message, result_data)
+            result_msg = self._build_action_result_message(message, None)
             yield event.plain_result(result_msg)
             
-            # 发送相应的图片
-            if result_data:
-                if result_data.get('community_image'):
-                    yield event.image_result(result_data['community_image'])
-                if result_data.get('showdown_image'):
-                    yield event.image_result(result_data['showdown_image'])
+            # 根据游戏阶段有选择地生成图片
+            game = self.game_manager.get_game_state(group_id)
+            if game:
+                # 只在阶段变更或摊牌时生成公共牌图片
+                if game.phase.value in ["flop", "turn", "river"]:
+                    community_image = self.game_manager.generate_community_image(group_id)
+                    if community_image:
+                        yield event.image_result(community_image)
+                
+                # 只在摊牌阶段生成摊牌图片
+                if game.phase.value == "showdown":
+                    showdown_image = self.game_manager.generate_showdown_image(group_id)
+                    if showdown_image:
+                        yield event.image_result(showdown_image)
         else:
             error_msg = fmt_error(
                 "游戏操作失败",
@@ -336,7 +345,7 @@ class CommandHandler:
     
     def _build_join_success_message(self, group_id: str, nickname: str, buyin: int) -> list:
         """构建加入成功消息"""
-        game = self.game_controller.get_game_state(group_id)
+        game = self.game_manager.get_game_state(group_id)
         if not game:
             return [f"✅ {nickname} 成功加入游戏！"]
         
@@ -372,7 +381,7 @@ class CommandHandler:
     
     def _build_game_start_message(self, group_id: str) -> Optional[str]:
         """构建游戏开始消息"""
-        game = self.game_controller.get_game_state(group_id)
+        game = self.game_manager.get_game_state(group_id)
         if not game:
             return None
         

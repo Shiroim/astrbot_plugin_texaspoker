@@ -138,98 +138,19 @@ class Player:
             self.chips += amount
     
     def reset_for_new_hand(self) -> None:
-        """重置玩家状态以开始新一手牌（增强版本）"""
-        # 保存重置前的状态用于验证
-        old_state = {
-            'hole_cards': len(self.hole_cards),
-            'current_bet': self.current_bet,
-            'is_folded': self.is_folded,
-            'is_all_in': self.is_all_in,
-            'last_action': self.last_action
-        }
-        
-        # 重置手牌相关状态
+        """重置玩家状态以开始新一手牌"""
         self.hole_cards = []
-        
-        # 重置下注相关状态
         self.current_bet = 0
-        
-        # 重置玩家行动状态
         self.is_folded = False
         self.is_all_in = False
         self.last_action = None
         self.has_acted_this_round = False
-        
-        # 验证重置是否完成（调试模式下）
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"玩家 {self.nickname} 状态重置: "
-                    f"手牌 {old_state['hole_cards']}->0, "
-                    f"下注 {old_state['current_bet']}->0, "
-                    f"弃牌 {old_state['is_folded']}->False, "
-                    f"全下 {old_state['is_all_in']}->False, "
-                    f"行动 {old_state['last_action']}->None")
     
     def reset_for_new_betting_round(self) -> None:
-        """重置玩家状态以开始新的下注轮（增强版本）"""
-        # 保存重置前的状态用于验证
-        old_bet = self.current_bet
-        old_acted = self.has_acted_this_round
-        old_action = self.last_action
-        
-        # 重置下注相关状态
+        """重置玩家状态以开始新的下注轮"""
         self.current_bet = 0
         self.has_acted_this_round = False
         self.last_action = None
-        
-        # 验证重置是否成功（调试模式下）
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"玩家 {self.nickname} 下注轮状态重置: "
-                    f"下注 {old_bet}->0, "
-                    f"已行动 {old_acted}->False, "
-                    f"行动 {old_action}->None")
-    
-    def validate_state(self) -> bool:
-        """
-        验证玩家状态的一致性（增强版本，针对德州扑克规则）
-        
-        Returns:
-            True表示状态一致，False表示状态异常
-        """
-        try:
-            # 检查基本字段类型
-            if not isinstance(self.chips, (int, float)) or self.chips < 0:
-                return False
-            
-            if not isinstance(self.current_bet, (int, float)) or self.current_bet < 0:
-                return False
-            
-            if not isinstance(self.hole_cards, list):
-                return False
-            
-            # 检查德州扑克特有的逻辑一致性
-            if self.is_all_in and self.chips > 0:
-                # 全下的玩家不应该有剩余筹码
-                return False
-            
-            if self.is_folded and not self.is_all_in and self.chips <= 0:
-                # 弃牌且非全下的玩家不应该没有筹码
-                return False
-            
-            # 检查手牌数量（德州扑克规则：每人2张手牌）
-            if len(self.hole_cards) > 2:
-                return False
-            
-            # 检查行动状态的一致性
-            if self.is_folded and self.has_acted_this_round and not self.last_action:
-                # 已弃牌且已行动的玩家应该有最后行动记录
-                pass  # 这个检查可能过于严格，暂时跳过
-            
-            return True
-            
-        except Exception:
-            return False
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -291,8 +212,8 @@ class TexasHoldemGame:
     last_action_time: int = field(default_factory=lambda: int(time.time()))  # 最后行动时间
     timeout_seconds: int = 30              # 超时时间
     
-    # 内部状态追踪（不保存到存储）
-    _phase_just_changed: bool = field(default=False, init=False)  # 阶段是否刚刚改变
+    # 游戏内部状态（运行时）
+    _deck: Optional[Any] = field(default=None, init=False)  # 当前牌组
     
     def __post_init__(self):
         """初始化后处理"""
@@ -357,7 +278,17 @@ class TexasHoldemGame:
         return int(time.time()) - self.last_action_time > self.timeout_seconds
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典（不包含内部状态字段）"""
+        """转换为字典"""
+        # 保存已发牌的状态用于恢复
+        dealt_cards = []
+        if hasattr(self, '_deck') and self._deck:
+            # 计算已发的牌
+            total_cards = 52
+            remaining_cards = self._deck.remaining_count()
+            dealt_cards_count = total_cards - remaining_cards
+            dealt_cards = [str(card) for player in self.players for card in player.hole_cards]
+            dealt_cards.extend([str(card) for card in self.community_cards])
+        
         return {
             'game_id': self.game_id,
             'group_id': self.group_id,
@@ -373,8 +304,8 @@ class TexasHoldemGame:
             'big_blind': self.big_blind,
             'created_at': self.created_at,
             'last_action_time': self.last_action_time,
-            'timeout_seconds': self.timeout_seconds
-            # 注意：_phase_just_changed 是内部状态，不保存到存储
+            'timeout_seconds': self.timeout_seconds,
+            'dealt_cards': dealt_cards  # 保存已发牌状态
         }
     
     @classmethod
@@ -400,5 +331,33 @@ class TexasHoldemGame:
         
         if data.get('players'):
             game.players = [Player.from_dict(p) for p in data['players']]
+        
+        # 恢复时重新创建牌组，排除已发的牌
+        if data.get('phase') != 'waiting':
+            from .card import Card, Suit, Rank, Deck
+            game._deck = Deck()
+            
+            # 如果有已发牌记录，从牌组中移除
+            dealt_cards = data.get('dealt_cards', [])
+            if dealt_cards:
+                # 创建已发牌的Card对象
+                dealt_card_objects = []
+                for card_str in dealt_cards:
+                    try:
+                        # 解析牌面字符串，如"A♠"
+                        if len(card_str) >= 2:
+                            rank_str = card_str[:-1]
+                            suit_str = card_str[-1]
+                            
+                            # 查找对应的牌并移除
+                            for card in game._deck.cards[:]:
+                                if str(card) == card_str:
+                                    game._deck.cards.remove(card)
+                                    dealt_card_objects.append(card)
+                                    break
+                    except:
+                        pass  # 忽略解析错误
+                
+                logger.debug(f"游戏恢复: 排除了 {len(dealt_card_objects)} 张已发的牌")
         
         return game
