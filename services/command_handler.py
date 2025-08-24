@@ -2,7 +2,7 @@
 
 专门负责处理所有德州扑克相关的命令
 """
-from typing import AsyncGenerator, Dict, Any, Optional
+from typing import AsyncGenerator, Dict, Any, Optional, List, Tuple
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api.event.filter import command
 from astrbot.api import logger

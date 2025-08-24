@@ -3,7 +3,7 @@
 提供统一的错误处理和日志记录功能
 """
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable, Optional
+from typing import Any, AsyncGenerator, Callable, Optional, List, Dict, Tuple
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api import logger
 

@@ -3,7 +3,7 @@
 提供插件配置的统一管理
 """
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 from pathlib import Path
 from astrbot.api.star import StarTools, Context
 from astrbot.api import logger

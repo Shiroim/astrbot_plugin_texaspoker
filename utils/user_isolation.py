@@ -4,7 +4,7 @@
 参考papertrading插件的隔离机制实现。
 """
 
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, List
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api import logger
 

@@ -5,7 +5,7 @@
 - 状态验证
 - 阶段特定的逻辑处理
 """
-from typing import List, Optional, Callable, Any, Dict
+from typing import List, Optional, Callable, Any, Dict, Tuple
 from enum import Enum
 from ..models.game import TexasHoldemGame, Player, GamePhase
 from ..models.card import Deck

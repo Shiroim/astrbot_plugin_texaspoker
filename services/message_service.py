@@ -4,7 +4,7 @@
 """
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from astrbot.api.star import Context
 from astrbot.api import logger
 

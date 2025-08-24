@@ -8,7 +8,7 @@
 """
 
 import asyncio
-from typing import AsyncGenerator, Dict, Any
+from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
 from astrbot.api.event.filter import command
 from astrbot.api.star import Context, Star, register

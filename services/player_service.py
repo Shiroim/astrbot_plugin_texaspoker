@@ -3,7 +3,7 @@
 提供玩家注册、查询、更新等功能
 """
 import time
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from ..models.game import Player
 from astrbot.api import logger
 

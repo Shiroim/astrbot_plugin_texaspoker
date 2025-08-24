@@ -7,7 +7,7 @@
 - Deck: 牌组管理器
 """
 from dataclasses import dataclass
-from typing import List, Optional, Iterator
+from typing import List, Optional, Iterator, Tuple
 from enum import Enum
 import random
 
